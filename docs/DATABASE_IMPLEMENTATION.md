@@ -218,7 +218,7 @@ Cross-cutting rules:
 
 | Suite | Command | Needs DB | Count |
 |---|---|---|---|
-| Unit (all packages) | `npm test` | no | 51 |
+| Unit (all packages) | `npm test` | no | 55 |
 | DB integration | `npm run test:integration -w @fitcoach/db` | yes | 14 |
 | API smoke | `npm run test:smoke -w @fitcoach/api` | yes | 9 |
 
@@ -318,7 +318,12 @@ Semantic notes:
 | D8 | nullable string arrays (`photo_refs`, `substitution_exercise_ids`) | `String[] @default([])` (NOT NULL, default empty) | Prisma cannot map nullable arrays; empty ≡ absent at the domain boundary |
 | D9 | `foods.source_id` ON DELETE RESTRICT | ON DELETE CASCADE | user-created food sources cascade from `users`; erasure must take their foods with them |
 | D10 | plan versions RESTRICT; partial uniques expressed as partial indexes | versions CASCADE from plans; partial uniques on nullable columns expressed as plain `@unique` (PG treats NULLs as distinct) | erasure determinism; Prisma cannot express partial indexes |
-| D11 | history FKs RESTRICT | same guarantee as `NO ACTION DEFERRABLE INITIALLY DEFERRED`; additionally `goals.superseded_by_goal_id → goals(id)` is deferred | reachable history tables sit inside the `users(id)` cascade tree — immediate checks make erasure order-dependent; supersession links forward to a row inserted later in the same transaction |
+| D11 | history FKs RESTRICT | same guarantee as `NO ACTION DEFERRABLE INITIALLY DEFERRED`; additionally `goals.superseded_by_goal_id → goals(id)` is deferred | reachable history tables sit inside the `users(id)` cascade tree — immediate checks make erasure order-dependent; supersession links forward to a row inserted later in the same transaction
+
+| D12 | V2 domain fields (cholesterol, mono/poly/trans fat, omega-3/6, `additionalNutrients`, food preparation state, recipe yield, food-provenance tier, `meal_items.input_method`/`quantityEstimate`) | domain-only; `mapping.ts` persists the Phase 1 nutrient set | Persistence lands with the phase that uses it (Phase 4 nutrient registry + preparation/recipe columns — `docs/DATABASE_DESIGN.md` §23.2). No Phase 1 writer accepts the new fields, so nothing is silently lost |
+| D13 | food identity including raw/cooked state | `foods` uniqueness remains `(source_id, external_id)` | Depends on the chosen dataset's shape; decided in Phase 4 |
+| D14 | user-defined measurement sites | `body_measurement_values.site` remains a closed CHECK list | Needs a per-user site catalog (Phase 6) |
+| D15 | projections as mutable current state | (not implemented) immutable snapshots + supersession | Phase 7 design decision, recorded now so no mutable "current projection" row is ever created | |
 
 Other decisions worth explicit approval:
 

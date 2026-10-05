@@ -78,6 +78,23 @@ dependencies. Unit test files live next to sources as
 `persistence.integration.ts` / `smoke.ts` so `npm test` never starts a
 database. Full database documentation: docs/DATABASE_IMPLEMENTATION.md.
 
+## Documentation map
+
+| Document | What it answers |
+|---|---|
+| `docs/PRODUCT_SPEC.md` | What the product must be able to do (V2 vision, honesty rules) |
+| `docs/FITCOACH_ROADMAP.md` | What gets built, in what order, with what exit criteria |
+| `docs/ARCHITECTURE.md` | How the systems fit together; AI boundary; privacy boundaries |
+| `docs/DATABASE_DESIGN.md` | Persistence design + the V2 supported-vs-deferred review (§23) |
+| `docs/DATABASE_IMPLEMENTATION.md` | What actually runs today (Phase 1) + divergences |
+| `docs/OPEN_SOURCE_AUDIT.md` | Third-party code/data audit and license boundary |
+| `data/provenance/THIRD_PARTY.md` | Register of every third-party component/dataset |
+| `packages/*/src/README.md`, `packages/domain/src/entities.md` | Per-package boundaries and entity plans |
+
+Product navigation, domain boundaries and the roadmap are described once, in
+`docs/PRODUCT_SPEC.md` §3 and `docs/FITCOACH_ROADMAP.md`; other documents link to
+them instead of restating them.
+
 ## Architecture rules
 
 1. **Domain logic stays independent of UI and AI.** `domain`,
@@ -89,7 +106,24 @@ database. Full database documentation: docs/DATABASE_IMPLEMENTATION.md.
 3. **Domain models are not database models.** `packages/db` maps between
    them; nothing else knows about storage.
 4. **Third-party code/data requires provenance.** Anything external must be
-   registered in `data/provenance/THIRD_PARTY.md` with a verified license.
+   registered in `data/provenance/THIRD_PARTY.md` with a verified license, and
+   imported rows must carry that provenance in the database
+   (`external_sources`).
+5. **Estimated is not measured.** Any value carrying
+   `ProvenanceClass.estimated`/`inferred`, a `ConfidenceLevel` or an
+   `UncertaintyRange` must be presented as an estimate. Do not let a
+   photo-derived portion or a modelled body dimension escape as a fact.
+6. **Recommendations are evidence-backed.** Persistent coaching output
+   (`diagnoses`, `recommendations`, `interventions`) is written only from
+   deterministic derived facts, with persisted evidence. LLM conversation text is
+   never the record of why something was recommended.
+7. **Screens never own domain logic.** Aggregation/view-model code may assemble
+   domain summaries; it may not recompute targets, detect trends or diagnose.
+   In particular the HOME dashboard is an aggregation layer, never a second
+   source of truth (`docs/ARCHITECTURE.md` §4).
+8. **Absence is not zero.** Missing nutrients, measurements or sleep data stay
+   `undefined`/`NULL` through the whole pipeline; never substitute a zero or an
+   invented default (`docs/PRODUCT_SPEC.md` §19).
 
 ## Current status / intentional gaps
 
@@ -106,3 +140,22 @@ database. Full database documentation: docs/DATABASE_IMPLEMENTATION.md.
 - `ai` has no SDK/provider integration yet.
 - No UI framework, auth, AI SDK, or fitness API dependencies exist yet — this
   phase is foundation only.
+- **V2 architecture milestone (2026-10-05)** updated specification, architecture,
+  database review, package plans and roadmap without implementing future systems.
+  The only code change was additive, optional domain fields (nutrition nutrient
+  coverage, provenance/preparation/recipe-yield/estimate contracts, shared
+  confidence & uncertainty primitives) plus nutrient-set-driven arithmetic in
+  `packages/nutrition/src/snapshot.ts`. No migration was created; see
+  `docs/DATABASE_DESIGN.md` §23.4 and divergence D12.
+
+## Where new work goes
+
+Before implementing anything from `docs/FITCOACH_ROADMAP.md`:
+
+1. Check the phase's exit criteria and the deferred concept list in
+   `docs/DATABASE_DESIGN.md` §23 — if the concept is listed as deferred to your
+   phase, design the migration then, not now.
+2. Update the relevant doc section in the same change (design and implementation
+   move together).
+3. Keep the tests honest: new behaviour gets new tests; existing assertions are
+   never weakened to make a change pass.

@@ -65,6 +65,16 @@ export interface RoundedNutrients {
   alcoholGrams?: number;
 }
 
+// V2 divergence D12 (docs/DATABASE_IMPLEMENTATION.md §9): NutrientAmounts
+// gained V2 fields (cholesterol, mono/poly/trans fat, omega-3/6 and the
+// `additionalNutrients` micronutrient bag) plus food preparation state, recipe
+// yield and food-provenance tiers in the domain. Persistence for those is
+// deliberately deferred to Phase 4 (nutrient_definitions + food_nutrient_values
+// registry), so this mapping layer persists exactly the nutrients the Phase 1
+// schema stores. Nothing can silently lose data today because no Phase 1
+// writer accepts the new fields; the mapping functions gain the new columns in
+// the same migration that adds the registry.
+
 export function roundNutrients(amounts: NutrientAmounts): RoundedNutrients {
   if (!Number.isFinite(amounts.caloriesKcal)) {
     throw new RangeError(`non-finite calories: ${amounts.caloriesKcal}`);

@@ -46,6 +46,13 @@ export interface Timestamped {
 
 export type BaseEntity = Identified & Timestamped;
 
+/**
+ * Qualitative trust level for a nutrition value. Lives in shared.ts (V2) so
+ * non-nutrition domains (photo-estimated portions, imported food records) can
+ * reuse one scale; re-exported from nutrition.ts for existing callers.
+ */
+export type ConfidenceLevel = "measured" | "label_declared" | "estimated" | "unknown";
+
 /** Qualitative effort/intensity scale shared by training and activity data. */
 export type EffortLevel = "low" | "moderate" | "high";
 
@@ -61,4 +68,63 @@ export interface ExternalProvenance {
   licenseSpdx?: string;
   /** Reference to the entry in the provenance register. */
   registryRef?: string;
+}
+
+// ---------------------------------------------------------------------------
+// V2 shared primitives (architecture milestone, see docs/ARCHITECTURE.md).
+// These are contract types only: no persistence and no engines exist yet. They
+// exist so future domains (projection, physique, activity import, sleep) can
+// be designed without reintroducing ad-hoc "confidence"/"source" shapes.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a value came to exist, from the user's point of view. Used by physique
+ * models (CURRENT PHYSIQUE), projections and every estimate surface: an
+ * INFERRED body dimension must never be presented as a MEASURED one.
+ */
+export type ProvenanceClass = "measured" | "estimated" | "inferred";
+
+/**
+ * Where an observation originated. Platform health frameworks and wearables
+ * are names here, not special cases in code, so import pipelines can be added
+ * without touching the domain (docs/ARCHITECTURE.md §Activity pipeline).
+ */
+export type ObservationOrigin =
+  | "manual"
+  | "health_connect"
+  | "apple_health"
+  | "wearable"
+  | "phone_sensor"
+  | "imported_dataset"
+  | "ai_parsed"
+  | "photo_derived"
+  | "system_computed";
+
+/**
+ * An optional interval around a point estimate. Present precisely because the
+ * product must not invent precision (PRODUCT_SPEC §Scientific honesty):
+ * photo-estimated portions, body-composition estimates and physique
+ * projections all carry a range rather than a fake exact number.
+ */
+export interface UncertaintyRange {
+  /** Lower bound, inclusive, in the same unit as the estimate. */
+  low?: number;
+  /** Upper bound, inclusive, in the same unit as the estimate. */
+  high?: number;
+  /** Short human-readable explanation of the spread ("plate size guess"). */
+  note?: string;
+}
+
+/**
+ * A value plus how it should be trusted and shown. Reused by body-composition
+ * estimates, food-photo portion estimates and projection outputs.
+ */
+export interface Estimated<T> {
+  value: T;
+  /** measured = observed directly; estimated = modelled; inferred = derived. */
+  provenance: ProvenanceClass;
+  /** Qualitative trust level; see nutrition.ConfidenceLevel for the graded scale. */
+  confidence?: ConfidenceLevel;
+  /** Present whenever the value is not a point estimate. */
+  uncertainty?: UncertaintyRange;
 }

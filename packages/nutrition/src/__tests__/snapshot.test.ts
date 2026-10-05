@@ -87,3 +87,79 @@ test("divideNutrientAmounts splits a recipe batch into servings", () => {
   assert.throws(() => divideNutrientAmounts(batch, 0), RangeError);
   assert.throws(() => divideNutrientAmounts(batch, -2), RangeError);
 });
+
+// --- V2 nutrient coverage (fat detail, micronutrients, absence semantics) ---
+
+const CURRY: NutrientAmounts = {
+  caloriesKcal: 145,
+  proteinGrams: 18,
+  carbohydrateGrams: 6.2,
+  fatGrams: 6.1,
+  fiberGrams: 1.4,
+  saturatedFatGrams: 2.1,
+  monounsaturatedFatGrams: 2.6,
+  polyunsaturatedFatGrams: 1.1,
+  sodiumMilligrams: 410,
+  additionalNutrients: { iron_mg: 1.6, vitamin_d_mcg: 0.4 },
+};
+
+test("scaleNutrientDensity scales V2 fat detail and micronutrients", () => {
+  const scaled = scaleNutrientDensity(CURRY, 240);
+  closeTo(scaled.saturatedFatGrams, 2.1 * 2.4, "saturated fat");
+  closeTo(scaled.monounsaturatedFatGrams, 2.6 * 2.4, "monounsaturated fat");
+  closeTo(scaled.polyunsaturatedFatGrams, 1.1 * 2.4, "polyunsaturated fat");
+  closeTo(scaled.sodiumMilligrams, 410 * 2.4, "sodium");
+  closeTo(scaled.additionalNutrients?.["iron_mg"] ?? 0, 1.6 * 2.4, "iron");
+  closeTo(scaled.additionalNutrients?.["vitamin_d_mcg"] ?? 0, 0.4 * 2.4, "vitamin D");
+});
+
+test("sparse nutrient data stays absent instead of becoming zero", () => {
+  // A source that publishes no trans fat and no omegas must not have zeros
+  // invented for it (PRODUCT_SPEC V2 §Scientific honesty).
+  const sparse: NutrientAmounts = {
+    caloriesKcal: 120,
+    proteinGrams: 22,
+    carbohydrateGrams: 1,
+    fatGrams: 3,
+  };
+  const scaled = scaleNutrientDensity(sparse, 100);
+  assert.equal(scaled.transFatGrams, undefined);
+  assert.equal(scaled.omega3Grams, undefined);
+  assert.equal(scaled.omega6Grams, undefined);
+  assert.equal(scaled.cholesterolMilligrams, undefined);
+  assert.equal(scaled.additionalNutrients, undefined);
+  // CURRY declares trans-fat-free data nowhere: scaling it must not invent it.
+  assert.equal(scaleNutrientDensity(CURRY, 100).transFatGrams, undefined);
+});
+
+test("sumNutrientAmounts keeps absent nutrients absent and merges micronutrients", () => {
+  const totals = sumNutrientAmounts([
+    scaleNutrientDensity(CURRY, 100),
+    { caloriesKcal: 165, proteinGrams: 31, carbohydrateGrams: 0, fatGrams: 3.6 },
+  ]);
+  closeTo(totals.saturatedFatGrams, 2.1, "saturated fat only from items that declare it");
+  closeTo(totals.monounsaturatedFatGrams, 2.6, "monounsaturated fat from the declaring item");
+  closeTo(totals.polyunsaturatedFatGrams, 1.1, "polyunsaturated fat from the declaring item");
+  assert.equal(totals.transFatGrams, undefined);
+  assert.equal(totals.cholesterolMilligrams, undefined);
+  closeTo(totals.additionalNutrients?.["iron_mg"] ?? 0, 1.6, "iron from the single declaring item");
+
+  const twoSources = sumNutrientAmounts([
+    { ...CURRY, additionalNutrients: { iron_mg: 1 } },
+    { ...CURRY, additionalNutrients: { iron_mg: 2, zinc_mg: 3 } },
+  ]);
+  closeTo(twoSources.additionalNutrients?.["iron_mg"] ?? 0, 3, "iron summed across items");
+  closeTo(twoSources.additionalNutrients?.["zinc_mg"] ?? 0, 3, "zinc from one item only");
+});
+
+test("divideNutrientAmounts splits V2 nutrients into per-gram/per-serving values", () => {
+  const batch = scaleNutrientDensity(CURRY, 500);
+  // 500 g batch = 725 kcal; per gram that is 1.45 kcal (145 kcal per 100 g).
+  const perGram = divideNutrientAmounts(batch, 500);
+  closeTo(perGram.caloriesKcal, 1.45, "per-gram calories");
+  closeTo(perGram.polyunsaturatedFatGrams, 0.011, "per-gram polyunsaturated fat");
+  closeTo(perGram.additionalNutrients?.["iron_mg"] ?? 0, 0.016, "per-gram iron");
+  closeTo(perGram.additionalNutrients?.["vitamin_d_mcg"] ?? 0, 0.004, "per-gram vitamin D");
+  // Micronutrients nobody declared stay absent rather than becoming 0.
+  assert.equal(perGram.additionalNutrients?.["zinc_mg"], undefined);
+});

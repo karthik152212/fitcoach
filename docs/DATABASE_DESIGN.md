@@ -1,12 +1,20 @@
-# FitCoach Database Design v0.1
+# FitCoach Database Design v0.2
 
-Status: **design only**. No ORM, no driver, no migrations, and no PostgreSQL
-installation exist yet. This document is the contract that the future
-persistence layer (packages/db) will implement. Nothing here is code.
+Status: **implemented for Phase 1 and reviewed for V2.** This document started
+as a pure design contract; Phase 1 implemented it (PostgreSQL + Prisma, 37
+models, migrations, repositories). What actually runs is described in
+`docs/DATABASE_IMPLEMENTATION.md`, including divergences D8–D12 from the design
+below. Where design and implementation disagree, the implementation doc wins for
+"what exists" and this doc remains the "why".
 
-Design date: 2026-08-25
+Design date: 2026-08-25 (v0.1), V2 review 2026-10-05.
 Inputs: docs/PRODUCT_SPEC.md, docs/ARCHITECTURE.md, packages/domain/src/,
 packages/fitness-core/src/, packages/nutrition/src/, packages/ai/src/.
+
+**§23 is the V2 product-requirement review**: for every concept the expanded
+product needs, it records whether the current schema already supports it, or
+whether it is deliberately deferred to a later phase (with rationale and the
+attachment point). Nothing in §23 has been created yet.
 
 ---
 
@@ -972,9 +980,15 @@ packages/domain and this schema, to reconcile in a later phase:
 None of these are silent: each requires a deliberate domain update later,
 tracked here.
 
+Subsequent divergences found while implementing Phase 1 (D8–D11: array typing,
+cascade/restrict choices, partial uniques expressed as plain unique, deferred
+foreign keys) are recorded in `docs/DATABASE_IMPLEMENTATION.md` §9. Divergences
+introduced by the V2 architecture milestone (D12–D15) are in §23.5 above.
+
 ## 20. Summary
 
-35 tables in five clusters: identity (users, profiles), goals
+37 models in five clusters (implemented in Phase 1): identity (users,
+profiles, profile_revisions), goals
 (goals, physique_targets, goal_priorities), equipment (catalog + timed
 inventory), reference catalog with provenance (external_sources, muscles,
 exercises, relations, required-equipment), training (plans, versions,
@@ -1034,3 +1048,152 @@ snapshotted at write time; reference data retires instead of disappearing.
   phase.
 - **Q8 — Curated food/exercise dataset selection.** Which licensed datasets
   seed the catalog (ties Q2/Q17 to THIRD_PARTY.md workflow).
+- **Q9 — Nutrient registry granularity.** Does `nutrient_definitions` cover only
+  nutrients we display, or the full nutrient universe of a source dataset? Affects
+  import size and the per-food row count (Phase 4).
+- **Q10 — Preparation-state identity.** One `foods` row per (name, state) or one
+  row carrying per-state nutrient values? Depends on the chosen dataset (D13).
+- **Q11 — Photo retention.** How long are raw meal/body photos retained, and does
+  deletion of a photo also delete the derived estimate? Privacy requirement from
+  PRODUCT_SPEC §22, unresolved until the identity/storage design exists.
+- **Q12 — Recovery representation.** One sleep observation stream, or separate
+  streams per source (Health Connect, Apple Health, manual) with reconciliation?
+  Affects the deduplication key (Phase 5).
+- **Q13 — Outcome-level constraints.** Are LEVEL 2/3 constraints stored as data
+  (editable, versioned) or derived deterministically from level + goal? Affects
+  whether a recommendation can be reproduced years later (Phase 8).
+- **Q14 — Projection horizon policy.** Which horizons are always generated versus
+  on demand, and does the product store a projection per horizon per snapshot, or
+  only the horizons the user asked for (Phase 7)?
+
+## 23. V2 product-requirement review (architecture milestone, 2026-10-05)
+
+The product scope expanded substantially (docs/PRODUCT_SPEC.md v2.0). This
+section reviews the existing schema against every new requirement and decides,
+per concept, **supported now** vs **deferred**. No deferred table has been
+created; the point is to prove the architecture can absorb them without redesign.
+
+Decision rules used:
+
+1. **Create only what Phase 1 already has data for.** Empty tables for future
+   systems are guesswork and constrain the design more than they help.
+2. **Defer via attachment, not via rework.** A deferred concept must attach to an
+   existing cluster using existing conventions (append-only observation rows,
+   interval-versioned state, write-time snapshots, provenance columns) so adding
+   it later is a migration, not a redesign.
+3. **Never pre-commit to a data shape we do not have.** E.g. no
+   `food_nutrient_values` rows before a licensed dataset is chosen and its
+   licence verified (§17, `data/provenance/THIRD_PARTY.md`).
+
+### 23.1 Concept-by-concept verdict
+
+| Concept (V2 requirement) | Verdict | Phase | Rationale / attachment point |
+|---|---|---|---|
+| Nutrition: energy + macros | **supported now** | 1 | `foods` density columns; `meals`/`meal_items`/`daily_nutrition` snapshots |
+| Nutrition: fiber, sugar, sodium, saturated fat, alcohol | **supported now** | 1 | nullable columns on `foods`; nullable snapshot columns; absence = NULL (unknown, not zero) |
+| Nutrition: mono/poly/trans fat, omega-3/6, cholesterol | **deferred** | 4 | Domain type widened (V2 milestone); needs `nutrient_definitions` + `food_nutrient_values` (§23.2) rather than 6 more columns per snapshot table |
+| Micronutrients addable without redesign | **partially supported** | 4 | Domain extension bag `NutrientAmounts.additionalNutrients` exists and flows through arithmetic; persistence needs the registry (§23.2) |
+| Nutrient value carries source / serving basis / unit / confidence / uncertainty / raw-cooked | **deferred** | 4 | `food_servings` covers serving basis; `food_sources` + `meal_items.confidence` cover source/confidence; per-value unit + uncertainty need `food_nutrient_values` |
+| Missing nutrients representable | **supported now** | 1 | nullable nutrient columns, NULL ≠ 0; arithmetic preserves absence |
+| Food: raw vs cooked, preparation method | **deferred** | 4 | `foods` needs `preparation_state` + `preparation_method` (CHECK-enum) and a uniqueness rule that includes them (§23.2) |
+| Food: brand | **supported now** | 1 | `foods.brand` |
+| Food: user-created foods | **supported now** | 1 | `food_sources.kind='user_created'` + owner cascade (D9) |
+| Food: regional / packaged / restaurant identity | **partial** | 4+ | expressible as separate `food_sources` entries + `external_sources`; a canonical region/venue dimension is not needed yet |
+| Recipes: ingredients, quantities, servings | **supported now** | 1 | `recipes`, `recipe_items` (gram quantities, position, FK RESTRICT) |
+| Recipes: per-ingredient preparation state | **deferred** | 4 | `recipe_items.preparation_state` |
+| Recipes: yield / finished weight | **deferred** | 4 | `recipes.yield_grams`; required for "I ate 240 g of this curry" |
+| Recipes: per-serving and per-gram nutrition | **derived now** | 1 | `sumNutrientAmounts` / `divideNutrientAmounts` produce both; nothing to store |
+| Recipes: versioning / history | **deferred** | 4 | `recipe_versions` + `recipe_version_items`; meals already snapshot values, so history is safe in the meantime |
+| Meals: "I ate 240 g of a recipe" | **partial** | 4 | DB already permits `recipe_id` + `quantity_grams`; resolving grams to a share of the batch needs `recipes.yield_grams` |
+| Food input: search | **supported now** | 1 | `foods` + `food_servings` catalog |
+| Food input: exact entry / user-created food | **supported now** | 1 | user-created `food_sources` |
+| Food input: natural language | **deferred** | 9 | AI parsing produces the same `MealItem` candidates; needs `meal_items.input_method` to record how a line was created |
+| Food input: photo-assisted with range/confidence/correction | **deferred** | later | `food_photo_observations` + `meal_items.input_method='photo_assisted'` + estimate/range columns; no CV now |
+| Food provenance tiers + license/terms | **partial** | 4 | `food_sources.kind`, `default_confidence`, `external_sources.license_spdx` exist; an explicit tier + terms URL needs columns |
+| Activity: steps, cardio sessions, duration, distance, HR, calories, effort | **supported now** | 1 | `activity_records` |
+| Activity: source/device/confidence/origin | **partial** | 5 | `recorded_via` + `external_id` exist; a device/source record and a `confidence` column are deferred |
+| Activity: raw observations before daily aggregation | **deferred** | 5 | `activity_observations` (raw, append-only, provider event ids) feeding `activity_records` aggregation |
+| Step pipeline RAW → NORMALIZE → DEDUPE → AGGREGATE → MODEL → COACHING | **partial** | 5 | dedupe + daily aggregation exist (`external_id` unique, max-wins upsert); raw observation layer deferred |
+| No universal step target | **n/a (logic)** | 3/5 | belongs in `fitness-core`, not the schema |
+| Sleep / recovery observations | **deferred** | 5 | `sleep_observations` (append-only, per-night, source device, quality indicators); recovery is a derived fact |
+| Recovery indicators / readiness | **derived** | 5/8 | computed by `fitness-core` from sleep + training load; not stored as truth |
+| Body measurements append-only with source/confidence/condition | **supported now** | 1 | `body_measurements` + `body_measurement_values` (trigger-enforced append-only) |
+| Body: user-defined measurement sites | **deferred** | 6 | `body_measurement_values.site` is CHECK-constrained to known sites; a per-user `body_measurement_sites` catalog is needed before custom labels |
+| Current physique: body model parameters (measured/estimated/inferred) | **deferred** | 6 | `body_model_snapshots` + `body_model_parameters` with a `provenance` column |
+| Physique snapshots (representation metadata) | **deferred** | 6 | `physique_snapshots` (inputs digest, model version, generated_at); media stays in object storage |
+| Projections: models, snapshots, assumptions, outcomes | **deferred** | 7 | `projection_snapshots` (horizon, generated_at, inputs digest), `projection_assumptions`, `projection_metrics` (metric + low/high/central + confidence) |
+| Projection recalculation on divergence | **partial** | 7/8 | immutable snapshots + `superseded_by` make history explicit; divergence detection is `fitness-core` |
+| Goal outcome levels (LEVEL 1/2/3) | **deferred** | 8 | `goal_outcome_levels` (goal-scoped level + constraints snapshot) |
+| Physique priorities (V-taper, shoulders, …) | **supported now** | 1 | `goal_priorities` (free tags); typed priority codes come with the levels in Phase 8 |
+| Evidence-first coaching chain | **supported now** | 1 | `diagnosis_evidence`, `recommendation_evidence`, `interventions`, `intervention_outcomes` |
+| NO_CHANGE as a first-class intervention | **supported now** | 1 | `interventions.kind='no_change'`; `intervention_outcomes.verdict='uncertain'` |
+| Dashboard aggregation without duplicate truth | **n/a (logic)** | 3+ | composition service over domain summaries; nothing persisted |
+| Privacy: raw images separate from derived data | **supported now** | 1 | `photo_refs` = object-storage keys only; measurements independent of media |
+| Privacy: user deletion | **supported now** | 1 | cascade from `users(id)`; deferred tables must join that tree |
+
+### 23.2 Planned deferred tables (Phase 4 — nutrition intelligence)
+
+Named here so the shape is reviewable **before** it is written; each is created
+in its own migration when the phase starts.
+
+| Table / change | Purpose | Key properties |
+|---|---|---|
+| `nutrient_definitions` | canonical nutrient registry (key, display name, unit, energy conversion, data type) | global reference data, retire-only; supplies the keys used by `NutrientAmounts.additionalNutrients` |
+| `food_nutrient_values` | per-food nutrient rows: value, unit, serving basis, confidence, uncertainty, source | replaces 6 more columns per snapshot table; unique on (food, nutrient key, serving basis) |
+| `foods.preparation_state` + `preparation_method` | raw vs cooked identity | CHECK-enum; participates in food uniqueness within a source |
+| `recipes.yield_grams` | finished weight of a batch | enables gram-based logging of a recipe share |
+| `recipe_versions` + `recipe_version_items` | recipe history | meals already snapshot values, so this serves reproducibility, not old meals |
+| `food_photo_observations` | photo-derived candidates/portions | raw image stays in object storage; stores object key + estimates + confidence + user correction |
+| `meal_items.input_method` + quantity-estimate columns | how a line was created and how certain it is | distinguishes measured from estimated quantities |
+
+Rationale for deferring rather than widening columns today: micronutrient
+columns would multiply across every snapshot table (`meal_items`, `meals`,
+`daily_nutrition`) and every future table, and still would not cover the long
+tail. A registry-keyed table covers the long tail once, and the existing
+nullable-column pattern already teaches "absent = unknown".
+
+### 23.3 Planned deferred tables (Phases 5–8)
+
+| Phase | Tables |
+|---|---|
+| 5 — activity/recovery | `activity_observations`, `data_sources` (device/provider records), `sleep_observations` |
+| 6 — body/physique | `body_measurement_sites`, `body_model_snapshots`, `body_model_parameters`, `physique_snapshots` |
+| 7 — projection | `projection_snapshots`, `projection_assumptions`, `projection_metrics` |
+| 8 — goals/diagnosis | `goal_outcome_levels`, `goal_priority_codes`, `projection_divergences` |
+
+All of them reuse the existing conventions: append-only observations, interval
+versioning, write-time snapshots, `user_id` inside the cascade tree, and CHECK
+enumerations mirroring domain unions.
+
+### 23.4 What this review changed
+
+- **Domain only** (no migration): `NutrientAmounts` gained cholesterol,
+  mono/poly/trans fat, omega-3/6 and the `additionalNutrients` micronutrient
+  bag; `Food` gained `preparationState` / `preparationMethod` / `recipeId`;
+  `FoodSource` gained `tier` / `licenseSpdx` / `termsUrl`; `RecipeItem` gained
+  `preparationState`; `Recipe` gained `yieldGrams`; `MealItem` gained
+  `inputMethod` and `quantityEstimate`; shared primitives gained
+  `ConfidenceLevel` (moved from `nutrition.ts`), `ProvenanceClass`,
+  `ObservationOrigin`, `UncertaintyRange` and `Estimated<T>`.
+- **Nutrition arithmetic became nutrient-set-driven**, so new nutrients flow
+  through scale/sum/divide unchanged and absence is preserved.
+- **No schema migration.** Every new field is optional and additive; persistence
+  arrives with the phases that use it (divergence D12).
+
+### 23.5 Divergences introduced by this milestone
+
+- **D12 — V2 domain fields are domain-only until their phase ships.** The
+  optional nutrition/provenance/recipe fields above are not persisted yet.
+  Consequence: mapping in `packages/db/src/mapping.ts` persists exactly the
+  Phase 1 nutrient set. No Phase 1 writer accepts the new fields, so nothing is
+  silently lost; the mapping gains the new columns in the same migration that
+  creates the registry (§23.2).
+- **D13 — `foods` uniqueness stays `(source_id, external_id)` for now.** Once
+  preparation state lands, "chicken, raw" and "chicken, cooked" must be either
+  distinguishable rows or one row with per-state nutrient values. Deferred to
+  Phase 4 because the answer depends on the chosen dataset's shape.
+- **D14 — `body_measurement_values.site` stays a closed CHECK list** until a
+  per-user site catalog exists; user-defined sites are Phase 6.
+- **D15 — projections are immutable snapshots, not a single "current" row.**
+  Recalculation appends a new snapshot and marks the previous one superseded
+  (same pattern as plan versions, §7).
