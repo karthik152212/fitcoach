@@ -1,0 +1,16 @@
+{
+  "name": "@fitcoach/fitness-core",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Deterministic training logic: coverage, selection, redundancy, volume, progression, splits, trends, diagnosis, interventions.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@fitcoach/domain": "*"
+  }
+}

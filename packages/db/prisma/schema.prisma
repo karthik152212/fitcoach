@@ -1,0 +1,1091 @@
+// FitCoach persistence schema — implementation of docs/DATABASE_DESIGN.md v0.1.
+//
+// Conventions (design doc §2):
+// - snake_case names via @@map/@map; tables plural; FK columns "<singular>_id".
+// - Primary keys are application-generated UUIDv7 (approved decision 1); no
+//   database-side gen_random_uuid() defaults on domain entities.
+// - Timestamps timestamptz UTC. Mutable tables carry updated_at; immutable
+//   observation tables deliberately omit it.
+// - date columns are user-local days (users.timezone defines the day).
+// - Exact numeric with explicit precision for physical/nutrition quantities.
+// - Enum-like columns are text + CHECK constraints. CHECK constraints,
+//   partial/expression unique indexes, GIN/INCLUDE indexes and append-only
+//   triggers live in the SQL migrations (Prisma cannot express them); every
+//   such column carries a comment listing its allowed values verbatim.
+//
+// History strategy (§5): observations/events are append-only; goals and plan
+// content are interval-versioned; nutrition/targets/context values are
+// snapshotted at write time; reference data is retired (is_active), never
+// deleted.
+//
+// RLS note (approved decision 6): every user-owned table carries user_id (or
+// cascades through a parent that does), so row-level security can be enabled
+// later without schema changes. Application authorization must not rely on it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster A — identity, profile history, goals, equipment inventory
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id @db.Uuid
+  email         String?  @db.Text
+  displayName   String?  @map("display_name") @db.Text
+  /// Reserved for the auth phase. UNIQUE (external_auth_id) partial in the
+  /// design == PG UNIQUE (NULLs are distinct) — expressed as @unique.
+  externalAuthId String? @unique @map("external_auth_id") @db.Text
+  /// IANA timezone identifier (e.g. "Asia/Kolkata"); defines local-day math.
+  /// CHECK (timezone <> '').
+  timezone      String   @default("UTC") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  profile             Profile?
+  profileRevisions    ProfileRevision[]
+  goals               Goal[]
+  userEquipment       UserEquipment[]
+  trainingPlans       TrainingPlan[]
+  workouts            Workout[]
+  bodyMeasurements    BodyMeasurement[]
+  activityRecords     ActivityRecord[]
+  ownedFoodSources    FoodSource[]      @relation("FoodSourceOwner")
+  ownedRecipes        Recipe[]          @relation("RecipeOwner")
+  meals               Meal[]
+  dailyNutrition      DailyNutrition[]
+  diagnoses           Diagnosis[]
+  recommendations     Recommendation[]
+  interventions       Intervention[]
+
+  // UNIQUE (external_auth_id) partial — @unique above.
+  // UNIQUE (lower(email)) WHERE email IS NOT NULL — partial expression, in migration SQL.
+
+  @@index([email])
+  @@map("users")
+}
+
+/// Current personal characteristics used by calculations (§4.1).
+/// Coaching-relevant attribute changes are recorded in ProfileRevision;
+/// unit_system is presentation-only and deliberately not versioned
+/// (approved decision 3).
+model Profile {
+  userId                  String  @id @map("user_id") @db.Uuid
+  birthDate               DateTime? @map("birth_date") @db.Date
+  /// CHECK in ('male','female','intersex','undisclosed') or NULL.
+  sex                     String? @db.Text
+  /// numeric(5,1) CHECK > 0.
+  heightCm                Decimal? @map("height_cm") @db.Decimal(5, 1)
+  /// CHECK in ('untrained','beginner','intermediate','advanced') or NULL.
+  trainingExperience      String? @map("training_experience") @db.Text
+  /// smallint CHECK BETWEEN 0 AND 7.
+  trainingDaysPerWeek     Int?    @map("training_days_per_week") @db.SmallInt
+  /// smallint CHECK > 0.
+  sessionDurationMinutes  Int?    @map("session_duration_minutes") @db.SmallInt
+  /// Free-form tags; may reveal health conditions — special-category data.
+  limitations             String[] @default([])
+  /// CHECK in ('metric','imperial'); display preference only, never versioned.
+  unitSystem              String  @default("metric") @map("unit_system") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+/// Append-only history of coaching-relevant profile attributes (approved
+/// decision 3). A revision is written only when a material field changes;
+/// unit_system changes create no revision. Immutable (trigger-enforced).
+model ProfileRevision {
+  id                     String   @id @db.Uuid
+  userId                 String   @map("user_id") @db.Uuid
+  birthDate              DateTime? @map("birth_date") @db.Date
+  sex                    String?  @db.Text
+  heightCm               Decimal? @map("height_cm") @db.Decimal(5, 1)
+  trainingExperience     String?  @map("training_experience") @db.Text
+  trainingDaysPerWeek    Int?     @map("training_days_per_week") @db.SmallInt
+  sessionDurationMinutes Int?     @map("session_duration_minutes") @db.SmallInt
+  /// Full material state at revision time.
+  limitations            String[] @default([])
+  /// Which material fields changed in this revision.
+  changedFields          String[] @map("changed_fields")
+  reason                 String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("profile_revisions")
+}
+
+/// Immutable, interval-versioned goal definitions (§6). Changing goals
+/// creates a new row; content columns are frozen by convention (only
+/// effective_until/superseded_by_goal_id move at supersession).
+model Goal {
+  id                String    @id @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  /// Self-reference: goal that replaced this one. FK is DEFERRABLE INITIALLY
+  /// DEFERRED in migration SQL (divergence D11): the linking UPDATE precedes
+  /// the INSERT that creates the target row inside one transaction.
+  supersededByGoalId String?  @map("superseded_by_goal_id") @db.Uuid
+  /// CHECK in domain GoalKind values ('bodybuilding','aesthetics_v_taper',
+  /// 'lean_recomposition','athletic_performance','max_strength',
+  /// 'general_fitness','custom').
+  kind              String    @db.Text
+  description       String?   @db.Text
+  /// User-local day the goal becomes effective.
+  effectiveFrom     DateTime  @map("effective_from") @db.Date
+  /// NULL = currently active. CHECK (effective_until IS NULL OR > effective_from).
+  effectiveUntil    DateTime? @map("effective_until") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supersededBy  Goal?             @relation("GoalSupersession", fields: [supersededByGoalId], references: [id], onDelete: SetNull)
+  supersessions Goal[]            @relation("GoalSupersession")
+  physiqueTarget PhysiqueTarget?
+  priorities    GoalPriority[]
+  activeDiagnoses   Diagnosis[]   @relation("DiagnosisActiveGoal")
+  activeInterventions Intervention[] @relation("InterventionActiveGoal")
+
+  // PARTIAL UNIQUE (user_id) WHERE effective_until IS NULL — at most one
+  // active goal per user; enforced in migration SQL.
+  @@index([userId, effectiveFrom(sort: Desc)])
+  @@map("goals")
+}
+
+/// Measurement targets belonging to one goal (1 : 0..1). Immutable with its
+/// goal (append-only trigger).
+model PhysiqueTarget {
+  id                       String   @id @db.Uuid
+  goalId                   String   @unique @map("goal_id") @db.Uuid
+  /// numeric(6,2) CHECK > 0.
+  bodyWeightKg             Decimal? @map("body_weight_kg") @db.Decimal(6, 2)
+  /// numeric(4,1) CHECK BETWEEN 0 AND 60.
+  bodyFatPercent           Decimal? @map("body_fat_percent") @db.Decimal(4, 1)
+  /// numeric(6,1) CHECK > 0; all circumference targets nullable.
+  waistCm                  Decimal? @map("waist_cm") @db.Decimal(6, 1)
+  chestCm                  Decimal? @map("chest_cm") @db.Decimal(6, 1)
+  shoulderCircumferenceCm  Decimal? @map("shoulder_circumference_cm") @db.Decimal(6, 1)
+  armCm                    Decimal? @map("arm_cm") @db.Decimal(6, 1)
+  thighCm                  Decimal? @map("thigh_cm") @db.Decimal(6, 1)
+  calfCm                   Decimal? @map("calf_cm") @db.Decimal(6, 1)
+  notes                    String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  // CHECK that at least one target field IS NOT NULL — in migration SQL.
+  @@map("physique_targets")
+}
+
+/// Ordered focus tags of a goal (domain Goal.priorities). Append-only.
+model GoalPriority {
+  id       String @id @db.Uuid
+  goalId   String @map("goal_id") @db.Uuid
+  /// 0 = most important. UNIQUE (goal_id, position).
+  position Int @db.SmallInt
+  tag      String @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, position])
+  @@map("goal_priorities")
+}
+
+// ---------------------------------------------------------------------------
+// Equipment catalog + per-user timed inventory (§4.3). Ownership is strictly
+// per-user gym/inventory (approved decision 5); no shared-gym ownership yet.
+// ---------------------------------------------------------------------------
+
+/// Global catalog of equipment types. Reference data is retired
+/// (is_active), never deleted.
+model Equipment {
+  id     String @id @db.Uuid
+  slug   String @unique @db.Text
+  name   String @db.Text
+  /// CHECK in domain EquipmentCategory values ('barbell','dumbbell',
+  /// 'kettlebell','machine','cable','smith_machine','bench','rack',
+  /// 'pull_up_bar','bands','bodyweight','cardio_machine','accessory','other').
+  category String @db.Text
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  userEquipment UserEquipment[]
+  requiredBy    ExerciseRequiredEquipment[]
+
+  @@map("equipment")
+}
+
+/// What equipment a specific user had, with validity interval so
+/// "equipment at time T" is answerable. Replaces lossy boolean availability
+/// (divergence D1). Past intervals remain as closed rows.
+model UserEquipment {
+  id             String  @id @db.Uuid
+  userId         String  @map("user_id") @db.Uuid
+  equipmentId    String  @map("equipment_id") @db.Uuid
+  label          String? @db.Text
+  specifications Json?   @db.JsonB
+  /// User-local day validity interval; NULL valid_to = still available.
+  /// CHECK (valid_to IS NULL OR valid_to > valid_from).
+  validFrom      DateTime @map("valid_from") @db.Date
+  validTo        DateTime? @map("valid_to") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, equipmentId, validFrom])
+  @@index([userId, validFrom(sort: Desc)])
+  @@map("user_equipment")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster B — reference catalog with provenance (§4.4, §10, §17).
+// Global, licensed, shared across users, never deleted.
+// ---------------------------------------------------------------------------
+
+/// DB counterpart of data/provenance/THIRD_PARTY.md: origin + license of
+/// third-party datasets. No exercise/muscle/food row may be imported from an
+/// unverified source (CHECK + application gate).
+model ExternalSource {
+  id             String  @id @db.Uuid
+  slug           String  @unique @db.Text
+  name           String  @db.Text
+  originUrl      String? @map("origin_url") @db.Text
+  licenseSpdx    String? @map("license_spdx") @db.Text
+  licenseVerified Boolean @default(false) @map("license_verified")
+  registryRef    String? @map("registry_ref") @db.Text
+  notes          String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  muscles   Muscle[]
+  exercises Exercise[]
+  foodSources FoodSource[]
+
+  // CHECK (license_verified = false OR license_spdx IS NOT NULL) — in SQL.
+  @@map("external_sources")
+}
+
+model Muscle {
+  id               String  @id @db.Uuid
+  externalSourceId String? @map("external_source_id") @db.Uuid
+  slug             String  @unique @db.Text
+  name             String  @db.Text
+  /// CHECK in domain MuscleGroup values.
+  group            String  @map("group") @db.Text
+  displayName      String? @map("display_name") @db.Text
+  /// Row identifier in the upstream dataset.
+  externalId       String? @map("external_id") @db.Text
+  isActive         Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  externalSource ExternalSource? @relation(fields: [externalSourceId], references: [id], onDelete: SetNull)
+  relations      ExerciseMuscleRelation[]
+
+  // UNIQUE (external_source_id, external_id) — NULLs are distinct in PG, so
+  // this equals the design's partial unique WHERE external_id IS NOT NULL.
+  @@unique([externalSourceId, externalId])
+  @@map("muscles")
+}
+
+model Exercise {
+  id               String  @id @db.Uuid
+  externalSourceId String? @map("external_source_id") @db.Uuid
+  slug             String  @unique @db.Text
+  name             String  @db.Text
+  aliases          String[] @default([])
+  /// CHECK in domain ExerciseCategory values ('compound','isolation',
+  /// 'conditioning','mobility','other').
+  category         String  @db.Text
+  /// CHECK in domain MovementPattern values, or NULL.
+  movementPattern  String? @map("movement_pattern") @db.Text
+  unilateral       Boolean @default(false)
+  instructions     String? @db.Text
+  externalId       String? @map("external_id") @db.Text
+  isActive         Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  externalSource   ExternalSource? @relation(fields: [externalSourceId], references: [id], onDelete: SetNull)
+  requiredEquipment ExerciseRequiredEquipment[]
+  muscleRelations  ExerciseMuscleRelation[]
+  planSlots        TrainingPlanExerciseSlot[]
+  workoutExercises WorkoutExercise[]
+
+  // UNIQUE (external_source_id, external_id) — NULLs are distinct in PG, so
+  // this equals the design's partial unique WHERE external_id IS NOT NULL.
+  @@unique([externalSourceId, externalId])
+  // GIN index on aliases — in migration SQL.
+  @@map("exercises")
+}
+
+/// All listed pieces are required simultaneously. Junction table because
+/// arrays cannot be FK-checked (equipment filtering is safety-relevant).
+model ExerciseRequiredEquipment {
+  exerciseId  String @map("exercise_id") @db.Uuid
+  equipmentId String @map("equipment_id") @db.Uuid
+
+  exercise  Exercise  @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+
+  @@id([exerciseId, equipmentId])
+  @@index([equipmentId])
+  @@map("exercise_required_equipment")
+}
+
+/// Role-weighted exercise→muscle mapping feeding coverage/volume.
+/// Sync-managed reference rows: no timestamps beyond conventions.
+model ExerciseMuscleRelation {
+  exerciseId String @map("exercise_id") @db.Uuid
+  muscleId   String @map("muscle_id") @db.Uuid
+  /// CHECK in ('primary_mover','secondary_mover','stabilizer').
+  role       String @db.Text
+  /// Advisory fraction; interpretation owned by fitness-core. 0..1.
+  contributionWeight Decimal? @map("contribution_weight") @db.Decimal(4, 3)
+
+  exercise Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  muscle   Muscle   @relation(fields: [muscleId], references: [id], onDelete: Restrict)
+
+  @@id([exerciseId, muscleId, role])
+  @@index([muscleId])
+  @@map("exercise_muscle_relations")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster C — training plans (versioned) → actual workouts (§4.5, §4.6, §7)
+// ---------------------------------------------------------------------------
+
+/// Container/current status of a user's plan. At most one active plan
+/// (partial unique in migration SQL).
+model TrainingPlan {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  name   String @db.Text
+  /// CHECK in ('draft','active','paused','retired').
+  status String @db.Text
+  notes  String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user     User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions TrainingPlanVersion[]
+  workouts Workout[]
+
+  @@index([userId])
+  @@map("training_plans")
+}
+
+/// Frozen content version of a plan. Immutable once any workout references
+/// it (application-enforced; no update path exists in repositories).
+model TrainingPlanVersion {
+  id             String    @id @db.Uuid
+  planId         String    @map("plan_id") @db.Uuid
+  /// integer CHECK >= 1. UNIQUE (plan_id, version_number).
+  versionNumber  Int       @map("version_number")
+  startsOn       DateTime  @map("starts_on") @db.Date
+  /// CHECK (ends_on IS NULL OR ends_on >= starts_on).
+  endsOn         DateTime? @map("ends_on") @db.Date
+  /// Why the plan changed — explainability.
+  rationaleNotes String?   @map("rationale_notes") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  plan      TrainingPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  sessions  TrainingPlanSession[]
+  workouts  Workout[]
+  diagnoses Diagnosis[]         @relation("DiagnosisActivePlanVersion")
+  interventions Intervention[] @relation("InterventionActivePlanVersion")
+
+  @@unique([planId, versionNumber])
+  @@map("training_plan_versions")
+}
+
+/// Session template within a plan version (§4.5).
+model TrainingPlanSession {
+  id          String  @id @db.Uuid
+  versionId   String  @map("version_id") @db.Uuid
+  name        String  @db.Text
+  /// Advisory hint only; 0 = Sunday .. 6 = Saturday. CHECK BETWEEN 0 AND 6.
+  weekdayHint Int?    @map("weekday_hint") @db.SmallInt
+  /// UNIQUE (version_id, position).
+  position    Int @db.SmallInt
+
+  slots TrainingPlanExerciseSlot[]
+  workouts Workout[]
+
+  version TrainingPlanVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, position])
+  @@map("training_plan_sessions")
+}
+
+/// Planned exercise per session. Content is frozen with its version.
+model TrainingPlanExerciseSlot {
+  id         String  @id @db.Uuid
+  sessionId  String  @map("session_id") @db.Uuid
+  exerciseId String  @map("exercise_id") @db.Uuid
+  /// smallint CHECK > 0.
+  targetSets Int?    @map("target_sets") @db.SmallInt
+  /// CHECK (rep_min IS NULL OR rep_max IS NULL OR rep_min <= rep_max).
+  repMin     Int?    @map("rep_min") @db.SmallInt
+  repMax     Int?    @map("rep_max") @db.SmallInt
+  /// numeric(3,1) CHECK BETWEEN 0 AND 10.
+  targetRir  Decimal? @map("target_rir") @db.Decimal(3, 1)
+  restSeconds Int?   @map("rest_seconds")
+  /// UNIQUE (session_id, position).
+  position   Int @db.SmallInt
+  /// Pragmatic uuid[] array; FK integrity on elements not enforceable
+  /// (documented tradeoff D5 — substitutions are suggestions). Prisma cannot
+  /// express nullable arrays, so "none" is the empty array rather than NULL
+  /// (documented divergence D8).
+  substitutionExerciseIds String[] @default([]) @map("substitution_exercise_ids") @db.Uuid
+  notes      String? @db.Text
+
+  session  TrainingPlanSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  exercise Exercise            @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, position])
+  @@index([exerciseId])
+  @@map("training_plan_exercise_slots")
+}
+
+// ---------------------------------------------------------------------------
+// Workouts (events) — what actually happened (§4.6)
+// ---------------------------------------------------------------------------
+
+/// A training session that happened (or was planned/skipped). Content is
+/// editable only until completion; afterwards repositories refuse mutations
+/// and corrections happen via new records (approved decision 2).
+model Workout {
+  id              String   @id @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  planId          String?  @map("plan_id") @db.Uuid
+  /// Which plan version produced this workout.
+  planVersionId   String?  @map("plan_version_id") @db.Uuid
+  planSessionId   String?  @map("plan_session_id") @db.Uuid
+  title           String?  @db.Text
+  /// CHECK in ('planned','in_progress','completed','partial','skipped').
+  status          String   @db.Text
+  startedAt       DateTime @map("started_at") @db.Timestamptz(6)
+  /// CHECK (ended_at IS NULL OR ended_at > started_at).
+  endedAt         DateTime? @map("ended_at") @db.Timestamptz(6)
+  notes           String?  @db.Text
+  /// Idempotency key for retries (§15).
+  clientRequestId String?  @map("client_request_id") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan        TrainingPlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
+  planVersion TrainingPlanVersion? @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  planSession TrainingPlanSession? @relation(fields: [planSessionId], references: [id], onDelete: SetNull)
+  exercises   WorkoutExercise[]
+
+  // Semantically the partial UNIQUE (user_id, client_request_id) WHERE NOT
+  // NULL: PostgreSQL treats NULL as distinct in composite unique constraints,
+  // so rows without a client_request_id never collide.
+  @@unique([userId, clientRequestId])
+  // PARTIAL INDEX (user_id) WHERE status IN ('planned','in_progress') — in SQL.
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([planVersionId])
+  @@map("workouts")
+}
+
+/// Groups a workout's sets per exercise with order and block-level notes.
+model WorkoutExercise {
+  id         String  @id @db.Uuid
+  workoutId  String  @map("workout_id") @db.Uuid
+  exerciseId String  @map("exercise_id") @db.Uuid
+  /// UNIQUE (workout_id, position).
+  position   Int
+  notes      String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workout  Workout       @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  exercise Exercise      @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
+  sets     ExerciseSet[]
+
+  @@unique([workoutId, position])
+  @@index([exerciseId])
+  @@map("workout_exercises")
+}
+
+/// The atomic performance observation (load/reps/RIR/RPE...). Editable until
+/// the parent workout completes; frozen afterwards (application-enforced).
+model ExerciseSet {
+  id               String   @id @db.Uuid
+  workoutExerciseId String  @map("workout_exercise_id") @db.Uuid
+  /// UNIQUE per (workout_exercise_id, position) index in migration SQL.
+  position         Int
+  /// CHECK in ('warmup','working','drop_set','rest_pause','amrap','failure').
+  kind             String   @db.Text
+  /// numeric(7,2) CHECK >= 0; NULL = bodyweight movement.
+  loadKg           Decimal? @map("load_kg") @db.Decimal(7, 2)
+  /// Weight added to bodyweight movements. numeric(7,2) CHECK >= 0.
+  addedLoadKg      Decimal? @map("added_load_kg") @db.Decimal(7, 2)
+  /// smallint CHECK BETWEEN 0 AND 1000.
+  reps             Int?     @db.SmallInt
+  /// numeric(8,2) CHECK >= 0.
+  distanceMeters   Decimal? @map("distance_meters") @db.Decimal(8, 2)
+  /// integer CHECK >= 0.
+  durationSeconds  Int?     @map("duration_seconds")
+  /// numeric(3,1) CHECK BETWEEN 0 AND 10.
+  rir              Decimal? @db.Decimal(3, 1)
+  /// numeric(3,1) CHECK BETWEEN 0 AND 10.
+  rpe              Decimal? @db.Decimal(3, 1)
+  notes            String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workoutExercise WorkoutExercise @relation(fields: [workoutExerciseId], references: [id], onDelete: Cascade)
+
+  // CHECK that at least one measurable exists:
+  // (reps OR distance_meters OR duration_seconds) IS NOT NULL — in SQL.
+  @@index([workoutExerciseId, position])
+  @@map("exercise_sets")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster D — body & nutrition (§4.7, §4.8)
+// ---------------------------------------------------------------------------
+
+/// Point-in-time body observation. Append-only (trigger-enforced):
+/// corrections add new rows (§9, approved decision 2).
+model BodyMeasurement {
+  id              String   @id @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  /// When measured (distinct from created_at logging time).
+  recordedAt      DateTime @map("recorded_at") @db.Timestamptz(6)
+  /// CHECK in ('morning_fasted','post_workout','evening','random','other').
+  condition       String?  @db.Text
+  /// numeric(6,2) CHECK > 0.
+  bodyWeightKg    Decimal? @map("body_weight_kg") @db.Decimal(6, 2)
+  /// numeric(4,1) CHECK BETWEEN 0 AND 60.
+  bodyFatPercent  Decimal? @map("body_fat_percent") @db.Decimal(4, 1)
+  /// CHECK in ('manual','smart_scale_import','wearable_import','other').
+  enteredVia      String?  @map("entered_via") @db.Text
+  /// CHECK in ('measured','estimated','unknown').
+  confidence      String?  @db.Text
+  sourceName      String?  @map("source_name") @db.Text
+  /// Provider event id for import dedupe (§15).
+  externalId      String?  @map("external_id") @db.Text
+  /// Object-storage keys only — binaries never in the DB (§16). Empty array
+  /// instead of NULL (Prisma cannot express nullable arrays; divergence D8).
+  photoRefs       String[] @default([]) @map("photo_refs")
+  notes           String?  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user   User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  values BodyMeasurementValue[]
+
+  // CHECK that at least one measurement datum exists (weight, fat%, or ≥1
+  // circumference row — child-row part enforced by the repository);
+  // expression UNIQUE (user_id, entered_via, external_id) WHERE
+  // COALESCE(external_id,'') <> '' — both in migration SQL.
+  @@index([userId, recordedAt(sort: Desc)])
+  @@index([externalId])
+  @@map("body_measurements")
+}
+
+/// Normalized circumferences per site (domain Partial<Record<BodySite,...>>).
+/// Append-only with its parent (trigger-enforced).
+model BodyMeasurementValue {
+  measurementId String  @map("measurement_id") @db.Uuid
+  /// CHECK in domain BodySite values.
+  site          String  @db.Text
+  /// numeric(6,1) CHECK > 0.
+  valueCm       Decimal @map("value_cm") @db.Decimal(6, 1)
+
+  measurement BodyMeasurement @relation(fields: [measurementId], references: [id], onDelete: Cascade)
+
+  @@id([measurementId, site])
+  // INDEX (site) INCLUDE (value_cm) — in migration SQL.
+  @@map("body_measurement_values")
+}
+
+/// Daily steps aggregate + discrete activity sessions. Append-only;
+/// the ONLY sanctioned mutation is the cumulative-steps import upsert
+/// (max wins, §15), which repositories expose as a dedicated operation.
+model ActivityRecord {
+  id                      String  @id @db.Uuid
+  userId                  String  @map("user_id") @db.Uuid
+  /// User-local day (users.timezone).
+  date                    DateTime @db.Date
+  /// CHECK in ('steps','walk','run','cycle','row','swim','elliptical',
+  /// 'stairs','sport','other').
+  kind                    String  @db.Text
+  /// Only meaningful for kind='steps'. integer CHECK >= 0.
+  steps                   Int?
+  /// integer CHECK >= 0.
+  durationMinutes         Int?    @map("duration_minutes")
+  /// numeric(7,3) CHECK >= 0.
+  distanceKm              Decimal? @map("distance_km") @db.Decimal(7, 3)
+  /// smallint CHECK BETWEEN 20 AND 260.
+  averageHeartRateBpm     Int?    @map("average_heart_rate_bpm") @db.SmallInt
+  /// numeric(7,2) CHECK >= 0.
+  estimatedCaloriesBurned Decimal? @map("estimated_calories_burned") @db.Decimal(7, 2)
+  /// CHECK in ('low','moderate','high').
+  effort                  String? @db.Text
+  recordedVia             String? @map("recorded_via") @db.Text
+  externalId              String? @map("external_id") @db.Text
+  notes                   String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // CHECK (kind <> 'steps' OR steps IS NOT NULL) and
+  // CHECK (kind = 'steps' OR steps IS NULL) — steps live only on step rows.
+  // PARTIAL UNIQUE (user_id, date, recorded_via) WHERE kind = 'steps'
+  // (one cumulative value per source/day → idempotent upsert).
+  // All in migration SQL.
+  @@index([userId, date(sort: Desc)])
+  @@index([userId, kind, date(sort: Desc)])
+  @@index([externalId])
+  @@map("activity_records")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster D (cont.) — nutrition: sources → foods → servings; recipes;
+// meals (snapshotted) → daily aggregates (§4.8, §8)
+// ---------------------------------------------------------------------------
+
+/// Origin + default trust level of food data. User-created sources belong to
+/// their owner; curated/imported sources are global.
+model FoodSource {
+  id                String  @id @db.Uuid
+  ownerUserId       String? @map("owner_user_id") @db.Uuid
+  externalSourceId  String? @map("external_source_id") @db.Uuid
+  name              String  @db.Text
+  /// CHECK in ('curated_database','user_created','imported','estimate').
+  kind              String  @db.Text
+  /// CHECK in ('measured','label_declared','estimated','unknown').
+  defaultConfidence String  @map("default_confidence") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner          User?          @relation("FoodSourceOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  externalSource ExternalSource? @relation(fields: [externalSourceId], references: [id], onDelete: SetNull)
+  foods          Food[]
+
+  // CHECK (kind <> 'user_created' OR owner_user_id IS NOT NULL) — in SQL.
+  @@index([ownerUserId])
+  @@index([externalSourceId])
+  @@map("food_sources")
+}
+
+/// Canonical food with nutrient density per 100 g/ml. Reference data:
+/// retired (is_active), never deleted — history depends on it.
+model Food {
+  id                String  @id @db.Uuid
+  sourceId          String  @map("source_id") @db.Uuid
+  defaultServingId  String? @map("default_serving_id") @db.Uuid
+  name              String  @db.Text
+  brand             String? @db.Text
+  /// CHECK ('per_100g','per_100ml').
+  densityBasis      String  @map("density_basis") @db.Text
+  // Nutrient density columns; NUMERIC CHECK >= 0 (constraints in SQL).
+  caloriesKcal      Decimal @map("calories_kcal") @db.Decimal(9, 2)
+  proteinG          Decimal @map("protein_g") @db.Decimal(8, 3)
+  carbohydrateG     Decimal @map("carbohydrate_g") @db.Decimal(8, 3)
+  fatG              Decimal @map("fat_g") @db.Decimal(8, 3)
+  fiberG            Decimal? @map("fiber_g") @db.Decimal(8, 3)
+  sugarsG           Decimal? @map("sugars_g") @db.Decimal(8, 3)
+  saturatedFatG     Decimal? @map("saturated_fat_g") @db.Decimal(8, 3)
+  alcoholG          Decimal? @map("alcohol_g") @db.Decimal(8, 3)
+  sodiumMg          Decimal? @map("sodium_mg") @db.Decimal(9, 3)
+  /// NULL = non-scannable. UNIQUE(barcode) partial in design == PG UNIQUE
+  /// (NULLs are distinct) — expressed as @unique here.
+  barcode           String? @unique @db.Text
+  externalId        String? @map("external_id") @db.Text
+  isActive          Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // CASCADE (not design's RESTRICT): food_sources.owner_user_id cascades from
+  // users, so user-created sources must take their foods with them on account
+  // erasure (divergence D11).
+  source         FoodSource    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  defaultServing FoodServing?  @relation("FoodDefaultServing", fields: [defaultServingId], references: [id], onDelete: SetNull)
+  servings       FoodServing[]
+  recipeItems    RecipeItem[]
+  mealItems      MealItem[]
+
+  // UNIQUE (source_id, external_id) partial == PG UNIQUE (NULLs distinct).
+  @@unique([sourceId, externalId])
+  @@index([sourceId])
+  @@index([name])
+  // GIN index on aliases — in migration SQL.
+  @@map("foods")
+}
+
+/// Named serving definition of a food. Exactly one size basis (SQL CHECK).
+model FoodServing {
+  id            String  @id @db.Uuid
+  foodId        String  @map("food_id") @db.Uuid
+  label         String  @db.Text
+  grams         Decimal? @db.Decimal(8, 2)
+  milliliters   Decimal? @db.Decimal(8, 2)
+  unitQuantity  Decimal? @map("unit_quantity") @db.Decimal(8, 2)
+  unitName      String?  @map("unit_name") @db.Text
+
+  defaultForFood Food[] @relation("FoodDefaultServing")
+  food           Food   @relation(fields: [foodId], references: [id], onDelete: Cascade)
+
+  // CHECK: exactly one of (grams XOR milliliters) or (unit_quantity+unit_name).
+  @@unique([foodId, label])
+  @@index([foodId])
+  @@map("food_servings")
+}
+
+/// Reusable food composition. owner NULL = global/shared.
+model Recipe {
+  id           String  @id @db.Uuid
+  ownerUserId  String? @map("owner_user_id") @db.Uuid
+  name         String  @db.Text
+  /// Portions the item quantities produce. integer CHECK > 0.
+  servings     Int
+  instructions String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner User?         @relation("RecipeOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  items RecipeItem[]
+  mealItems MealItem[]
+
+  @@index([ownerUserId])
+  @@index([name])
+  @@map("recipes")
+}
+
+/// Food quantities composing a recipe.
+model RecipeItem {
+  id             String  @id @db.Uuid
+  recipeId       String  @map("recipe_id") @db.Uuid
+  foodId         String  @map("food_id") @db.Uuid
+  /// numeric(9,2) CHECK > 0.
+  quantityGrams  Decimal @map("quantity_grams") @db.Decimal(9, 2)
+  position       Int
+  notes          String? @db.Text
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  food   Food   @relation(fields: [foodId], references: [id], onDelete: Restrict)
+
+  @@unique([recipeId, position])
+  @@index([foodId])
+  @@map("recipe_items")
+}
+
+/// A logged eating occasion with nutrition snapshot totals (§8).
+/// Totals refresh when items change; item-level snapshots never do.
+model Meal {
+  id         String  @id @db.Uuid
+  userId     String  @map("user_id") @db.Uuid
+  /// User-local day (users.timezone).
+  localDate  DateTime @map("local_date") @db.Date
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  /// CHECK in ('breakfast','lunch','dinner','snack','other').
+  slot       String?  @db.Text
+  // Snapshot totals; NUMERIC CHECK >= 0 (in SQL).
+  totalCaloriesKcal    Decimal @map("total_calories_kcal") @db.Decimal(10, 2)
+  totalProteinG        Decimal @map("total_protein_g") @db.Decimal(9, 3)
+  totalCarbohydrateG   Decimal @map("total_carbohydrate_g") @db.Decimal(9, 3)
+  totalFatG            Decimal @map("total_fat_g") @db.Decimal(9, 3)
+  totalFiberG          Decimal? @map("total_fiber_g") @db.Decimal(9, 3)
+  notes          String? @db.Text
+  /// Idempotency key for retries (§15).
+  clientRequestId String? @map("client_request_id") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items MealItem[]
+
+  // Semantically partial UNIQUE (user_id, client_request_id) WHERE NOT NULL.
+  @@unique([userId, clientRequestId])
+  @@index([userId, localDate(sort: Desc)])
+  @@map("meals")
+}
+
+/// One consumed line of a meal, with snapshotted nutrients. The snapshot is
+/// computed once at logging time; later food-database edits never touch it.
+model MealItem {
+  id         String  @id @db.Uuid
+  mealId     String  @map("meal_id") @db.Uuid
+  foodId     String? @map("food_id") @db.Uuid
+  recipeId   String? @map("recipe_id") @db.Uuid
+  /// numeric(9,2) CHECK > 0 (food path).
+  quantityGrams   Decimal? @map("quantity_grams") @db.Decimal(9, 2)
+  /// numeric(6,2) CHECK > 0 (recipe path).
+  recipeServings  Decimal? @map("recipe_servings") @db.Decimal(6, 2)
+  // Snapshot nutrients; NUMERIC CHECK >= 0 (in SQL).
+  caloriesKcal      Decimal @map("calories_kcal") @db.Decimal(10, 2)
+  proteinG          Decimal @map("protein_g") @db.Decimal(9, 3)
+  carbohydrateG     Decimal @map("carbohydrate_g") @db.Decimal(9, 3)
+  fatG              Decimal @map("fat_g") @db.Decimal(9, 3)
+  fiberG            Decimal? @map("fiber_g") @db.Decimal(9, 3)
+  /// CHECK in ('measured','label_declared','estimated','unknown').
+  confidence  String  @db.Text
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  meal    Meal     @relation(fields: [mealId], references: [id], onDelete: Cascade)
+  food    Food?    @relation(fields: [foodId], references: [id], onDelete: Restrict)
+  recipe  Recipe?  @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+
+  // Polymorphic ref: two nullable FKs + mutually-exclusive CHECK (in SQL).
+  @@index([mealId])
+  @@index([foodId])
+  @@index([recipeId])
+  @@map("meal_items")
+}
+
+/// Per-user-day aggregate snapshot + targets actually applied that day.
+/// Invariant: fully recomputable from meal_items; the stored copy exists so
+/// dashboards/audits do not depend on recompute-at-read.
+model DailyNutrition {
+  id      String @id @db.Uuid
+  userId  String @map("user_id") @db.Uuid
+  /// User-local day (users.timezone).
+  localDate DateTime @map("local_date") @db.Date
+  // Snapshot totals; NUMERIC CHECK >= 0 (in SQL).
+  totalCaloriesKcal    Decimal @map("total_calories_kcal") @db.Decimal(10, 2)
+  totalProteinG        Decimal @map("total_protein_g") @db.Decimal(9, 3)
+  totalCarbohydrateG   Decimal @map("total_carbohydrate_g") @db.Decimal(9, 3)
+  totalFatG            Decimal @map("total_fat_g") @db.Decimal(9, 3)
+  totalFiberG          Decimal? @map("total_fiber_g") @db.Decimal(9, 3)
+  /// Frozen copy of domain NutritionTargets incl. basis_note (§5 S3).
+  targetsSnapshot Json? @map("targets_snapshot") @db.JsonB
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, localDate])
+  @@index([userId, localDate(sort: Desc)])
+  @@map("daily_nutrition")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster E — coaching loop (§4.9, §11, §12)
+// ---------------------------------------------------------------------------
+
+/// A deterministic problem statement grounded in evidence. Linked to the goal
+/// and plan version that were active when it was created, so later goal/plan
+/// changes never rewrite old context.
+model Diagnosis {
+  id             String  @id @db.Uuid
+  userId         String  @map("user_id") @db.Uuid
+  activeGoalId   String? @map("active_goal_id") @db.Uuid
+  activePlanVersionId String? @map("active_plan_version_id") @db.Uuid
+  /// Stable machine code, e.g. 'protein_intake_below_target'.
+  code           String  @db.Text
+  title          String  @db.Text
+  summary        String  @db.Text
+  /// CHECK in ('informational','watch','act','urgent').
+  severity       String  @db.Text
+  /// CHECK in ('open','monitoring','resolved','dismissed').
+  status         String  @db.Text
+  analysisWindowDays Int? @map("analysis_window_days")
+  /// Frozen inputs used at analysis time (§5 S3) — justified JSON.
+  contextSnapshot Json?  @map("context_snapshot") @db.JsonB
+  /// Domain fields: factors/alternatives ruled in and out (divergence D9).
+  contributingFactors String[] @default([]) @map("contributing_factors")
+  ruledOut            String[] @default([]) @map("ruled_out")
+  resolvedAt     DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeGoal    Goal?               @relation("DiagnosisActiveGoal", fields: [activeGoalId], references: [id], onDelete: Restrict)
+  activePlanVersion TrainingPlanVersion? @relation("DiagnosisActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: Restrict)
+  evidence      DiagnosisEvidence[]
+  recommendations Recommendation[]
+  interventions Intervention[]
+  followUpOutcomes InterventionOutcome[] @relation("OutcomeFollowUpDiagnosis")
+
+  // partial (user_id) WHERE status IN ('open','monitoring') — in SQL.
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([code])
+  @@index([activeGoalId])
+  @@index([activePlanVersionId])
+  @@map("diagnoses")
+}
+
+/// The deterministic findings behind a diagnosis. Immutable child rows.
+model DiagnosisEvidence {
+  id          String  @id @db.Uuid
+  diagnosisId String  @map("diagnosis_id") @db.Uuid
+  /// Metric identifier, e.g. 'protein_daily_avg_g'.
+  metric      String  @db.Text
+  /// Analysis window, e.g. 'last_14_days'.
+  window      String  @db.Text
+  observed    String  @db.Text
+  /// Queryable numeric companion when the observation is a number.
+  observedNumeric Decimal? @map("observed_numeric") @db.Decimal(14, 4)
+  expected    String? @db.Text
+  position    Int
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  diagnosis Diagnosis @relation(fields: [diagnosisId], references: [id], onDelete: Cascade)
+
+  @@index([diagnosisId])
+  @@index([metric])
+  @@map("diagnosis_evidence")
+}
+
+/// What the system told the user, when, and why.
+model Recommendation {
+  id             String  @id @db.Uuid
+  userId         String  @map("user_id") @db.Uuid
+  diagnosisId    String? @map("diagnosis_id") @db.Uuid
+  interventionId String? @map("intervention_id") @db.Uuid
+  headline       String  @db.Text
+  explanation    String  @db.Text
+  alternativesConsidered String[] @default([]) @map("alternatives_considered")
+  presentedAt    DateTime @default(now()) @map("presented_at") @db.Timestamptz(6)
+  /// CHECK in ('presented','acknowledged','acted_on','dismissed','expired').
+  status         String  @db.Text
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  dismissedAt    DateTime? @map("dismissed_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  diagnosis    Diagnosis?        @relation(fields: [diagnosisId], references: [id], onDelete: Restrict)
+  intervention Intervention?     @relation(fields: [interventionId], references: [id], onDelete: Restrict)
+  evidence     RecommendationEvidence[]
+
+  @@index([userId, presentedAt(sort: Desc)])
+  @@index([diagnosisId])
+  @@index([interventionId])
+  @@map("recommendations")
+}
+
+/// Evidence as presented to the user — intentionally a copy, so later edits
+/// to diagnosis evidence never rewrite what the user saw.
+model RecommendationEvidence {
+  id                String  @id @db.Uuid
+  recommendationId  String  @map("recommendation_id") @db.Uuid
+  metric            String  @db.Text
+  window            String  @db.Text
+  observed          String  @db.Text
+  observedNumeric   Decimal? @map("observed_numeric") @db.Decimal(14, 4)
+  expected          String? @db.Text
+  position          Int
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@index([recommendationId])
+  @@map("recommendation_evidence")
+}
+
+/// The action taken (or deliberately: no action) to address a diagnosis.
+/// 'no_change' is first-class (§12).
+model Intervention {
+  id             String  @id @db.Uuid
+  userId         String  @map("user_id") @db.Uuid
+  diagnosisId    String? @map("diagnosis_id") @db.Uuid
+  supersededByInterventionId String? @map("superseded_by_intervention_id") @db.Uuid
+  activeGoalId   String? @map("active_goal_id") @db.Uuid
+  activePlanVersionId String? @map("active_plan_version_id") @db.Uuid
+  /// CHECK in domain InterventionKind values (includes 'no_change').
+  kind           String  @db.Text
+  /// Kind-specific structured params; shape validated per-kind in the
+  /// application, never by the DB (§12). Justified JSON.
+  parameters     Json    @default("{}") @db.JsonB
+  rationale      String  @db.Text
+  expectedEffect String  @map("expected_effect") @db.Text
+  reviewOn       DateTime? @map("review_on") @db.Date
+  /// CHECK in ('proposed','accepted','active','completed','rejected','superseded').
+  status         String  @db.Text
+  acceptedAt     DateTime? @map("accepted_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  diagnosis     Diagnosis?          @relation(fields: [diagnosisId], references: [id], onDelete: Restrict)
+  supersededBy  Intervention?       @relation("InterventionSupersession", fields: [supersededByInterventionId], references: [id], onDelete: SetNull)
+  supersessions Intervention[]      @relation("InterventionSupersession")
+  activeGoal    Goal?               @relation("InterventionActiveGoal", fields: [activeGoalId], references: [id], onDelete: Restrict)
+  activePlanVersion TrainingPlanVersion? @relation("InterventionActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: Restrict)
+  outcomes      InterventionOutcome[]
+  recommendations Recommendation[]
+
+  // partial (user_id) WHERE status = 'active' — in SQL.
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([diagnosisId])
+  @@index([activeGoalId])
+  @@index([activePlanVersionId])
+  @@map("interventions")
+}
+
+/// The observed result after the review window; closes the adaptive loop.
+/// Immutable; re-evaluation adds a new row (UNIQUE per evaluation window).
+model InterventionOutcome {
+  id                  String  @id @db.Uuid
+  interventionId      String  @map("intervention_id") @db.Uuid
+  followUpDiagnosisId String? @map("follow_up_diagnosis_id") @db.Uuid
+  evaluatedAt         DateTime @map("evaluated_at") @db.Timestamptz(6)
+  /// e.g. '14d_post'.
+  evaluationWindow    String  @map("evaluation_window") @db.Text
+  /// CHECK in ('improved_as_expected','no_effect','worsened','uncertain','too_early').
+  verdict             String  @db.Text
+  observations        String[] @default([])
+  explanation         String  @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  intervention      Intervention @relation(fields: [interventionId], references: [id], onDelete: Restrict)
+  followUpDiagnosis Diagnosis?   @relation("OutcomeFollowUpDiagnosis", fields: [followUpDiagnosisId], references: [id], onDelete: SetNull)
+
+  @@unique([interventionId, evaluationWindow])
+  @@index([interventionId])
+  @@index([followUpDiagnosisId])
+  @@map("intervention_outcomes")
+}
+

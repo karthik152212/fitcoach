@@ -1,0 +1,13 @@
+{
+  "name": "@fitcoach/domain",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Canonical, persistence-agnostic FitCoach domain models.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ]
+}

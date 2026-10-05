@@ -1,0 +1,26 @@
+{
+  "name": "@fitcoach/api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "FitCoach application API (zero-framework node:http over application services).",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "node --env-file-if-exists=../.env dist/index.js",
+    "test": "node --env-file-if-exists=../.env --test dist/__tests__/server.test.js",
+    "test:smoke": "node --env-file-if-exists=../.env dist/__tests__/smoke.js"
+  },
+  "dependencies": {
+    "@fitcoach/db": "*",
+    "@fitcoach/domain": "*",
+    "@fitcoach/nutrition": "*"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^17.5.0-beta.15"
+  }
+}

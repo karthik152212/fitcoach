@@ -1,0 +1,16 @@
+{
+  "name": "@fitcoach/ai",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "AI orchestration boundary: parsing, explanation and presentation over deterministic domain results.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@fitcoach/domain": "*"
+  }
+}

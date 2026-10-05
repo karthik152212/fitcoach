@@ -1,0 +1,17 @@
+{
+  "name": "@fitcoach/nutrition",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Deterministic nutrition logic: normalization, serving conversion, totals, targets, trends, confidence.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@fitcoach/domain": "*",
+    "@fitcoach/fitness-core": "*"
+  }
+}

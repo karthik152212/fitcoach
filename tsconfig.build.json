@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/domain" },
+    { "path": "packages/fitness-core" },
+    { "path": "packages/nutrition" },
+    { "path": "packages/db" },
+    { "path": "packages/ai" },
+    { "path": "apps/api" }
+  ]
+}

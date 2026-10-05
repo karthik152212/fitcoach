@@ -1,0 +1,33 @@
+{
+  "name": "@fitcoach/db",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "FitCoach persistence layer: PostgreSQL schema, migrations, repositories and mapping (docs/DATABASE_DESIGN.md).",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "postinstall": "prisma generate",
+    "build": "tsc -b ../../tsconfig.build.json",
+    "db:generate": "prisma generate",
+    "db:validate": "prisma validate",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:status": "prisma migrate status",
+    "db:seed": "node dist/seed/cli.js",
+    "test": "npm run build && node --env-file-if-exists=../.env --test dist/__tests__/unit.test.js",
+    "test:integration": "npm run build && node --env-file-if-exists=../.env --test dist/__tests__/persistence.integration.js"
+  },
+  "dependencies": {
+    "@fitcoach/domain": "*",
+    "@prisma/client": "^6.16.2"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^17.5.0-beta.15",
+    "prisma": "^6.16.2"
+  }
+}

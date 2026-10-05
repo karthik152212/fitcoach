@@ -20,9 +20,16 @@ The system optimizes the user's trajectory toward their chosen goal rather than 
 - `data/provenance` — third-party source and license registry
 - `docs` — product and technical specifications
 
+## Development
+
+Setup, workspace layout and commands: see `docs/DEVELOPMENT.md`.
+
 ## Current status
 
-Phase 0/1 scaffold. No openGym source has been copied into this repository.
+Phase 1 working backend foundation: PostgreSQL + Prisma schema/migrations,
+15 repositories, application API (`/v0`), idempotent seed, unit +
+integration + HTTP smoke tests (docs/DATABASE_IMPLEMENTATION.md).
+No openGym source has been copied into this repository.
 
 Open-source components and datasets will be evaluated individually and either:
 1. used under compatible licenses with required notices,
