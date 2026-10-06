@@ -27,7 +27,15 @@ import {
   RepositoryError,
   toRepositoryError,
 } from "../errors";
-import { SEED_EQUIPMENT, SEED_EXERCISES, SEED_FIXED_IDS, SEED_MUSCLES } from "../seed/fixtures";
+import { SEED_FIXED_IDS } from "../seed/fixtures";
+import { KNOWLEDGE_EXERCISES, KNOWLEDGE_SUBSTITUTIONS } from "../seed/knowledgeExercises";
+import {
+  KNOWLEDGE_EQUIPMENT,
+  KNOWLEDGE_MOVEMENT_FUNCTIONS,
+  KNOWLEDGE_MUSCLES,
+} from "../seed/knowledgeTaxonomy";
+import { formSteps } from "../seed/knowledgeTypes";
+import { REQUIRED_FORM_GUIDANCE_KEYS } from "@fitcoach/domain";
 
 // ---------------------------------------------------------------------------
 // UUIDv7
@@ -254,25 +262,83 @@ test("ConstraintValidationError is a RepositoryError with validation kind", () =
 // Seed fixture invariants (pure, no database)
 // ---------------------------------------------------------------------------
 
-test("seed fixtures are internally consistent", () => {
-  const equipmentSlugs = new Set(SEED_EQUIPMENT.map((item) => item.slug));
-  assert.equal(equipmentSlugs.size, SEED_EQUIPMENT.length, "equipment slugs unique");
+test("knowledge fixtures are internally consistent", () => {
+  const equipmentSlugs = new Set(KNOWLEDGE_EQUIPMENT.map((item) => item.slug));
+  assert.equal(equipmentSlugs.size, KNOWLEDGE_EQUIPMENT.length, "equipment slugs unique");
 
-  const muscleSlugs = new Set(SEED_MUSCLES.map((item) => item.slug));
-  assert.equal(muscleSlugs.size, SEED_MUSCLES.length, "muscle slugs unique");
+  const muscleSlugs = new Set(KNOWLEDGE_MUSCLES.map((item) => item.slug));
+  assert.equal(muscleSlugs.size, KNOWLEDGE_MUSCLES.length, "muscle slugs unique");
 
-  const exerciseSlugs = new Set(SEED_EXERCISES.map((item) => item.slug));
-  assert.equal(exerciseSlugs.size, SEED_EXERCISES.length, "exercise slugs unique");
+  const functionSlugs = new Set(KNOWLEDGE_MOVEMENT_FUNCTIONS.map((item) => item.slug));
+  assert.equal(functionSlugs.size, KNOWLEDGE_MOVEMENT_FUNCTIONS.length, "function slugs unique");
 
-  for (const exercise of SEED_EXERCISES) {
-    for (const equipment of exercise.requiredEquipment) {
+  const structureKey = new Set<string>();
+  for (const muscle of KNOWLEDGE_MUSCLES) {
+    for (const structure of muscle.structures ?? []) {
+      const key = `${muscle.slug}/${structure.slug}`;
+      assert.ok(!structureKey.has(key), `structure ${key} unique`);
+      structureKey.add(key);
+    }
+  }
+
+  const exerciseSlugs = new Set(KNOWLEDGE_EXERCISES.map((item) => item.slug));
+  assert.equal(exerciseSlugs.size, KNOWLEDGE_EXERCISES.length, "exercise slugs unique");
+
+  const variationKeys = new Set(KNOWLEDGE_EXERCISES.map((item) => item.variationKey));
+  assert.equal(
+    variationKeys.size,
+    KNOWLEDGE_EXERCISES.length,
+    "variation keys unique across the catalog",
+  );
+
+  for (const exercise of KNOWLEDGE_EXERCISES) {
+    for (const equipment of exercise.equipment) {
       assert.ok(equipmentSlugs.has(equipment), `${exercise.slug} references equipment ${equipment}`);
     }
     for (const relation of exercise.relations) {
       assert.ok(muscleSlugs.has(relation.muscle), `${exercise.slug} references muscle ${relation.muscle}`);
-      assert.ok(relation.weight > 0 && relation.weight <= 1, "weight in (0, 1]");
+      if (relation.weight !== undefined) {
+        assert.ok(relation.weight > 0 && relation.weight <= 1, "weight in (0, 1]");
+      }
+      if (relation.confidence !== undefined) {
+        assert.ok(relation.confidence > 0 && relation.confidence <= 1, "confidence in (0, 1]");
+      }
     }
     assert.ok(exercise.relations.length > 0, `${exercise.slug} has at least one muscle relation`);
+
+    for (const relation of exercise.structureRelations ?? []) {
+      assert.ok(
+        structureKey.has(`${relation.muscle}/${relation.structure}`),
+        `${exercise.slug} references structure ${relation.muscle}/${relation.structure}`,
+      );
+    }
+
+    // A variation may never reference an unmodelled muscle or structure.
+    for (const relation of exercise.structureRelations ?? []) {
+      assert.ok(muscleSlugs.has(relation.muscle), `${exercise.slug} structure muscle exists`);
+    }
+
+    for (const fn of exercise.movementFunctions) {
+      assert.ok(functionSlugs.has(fn), `${exercise.slug} references function ${fn}`);
+    }
+    assert.ok(
+      exercise.movementFunctions.includes(exercise.primaryMovementFunction),
+      `${exercise.slug} primary function is in its function set`,
+    );
+
+    const steps = formSteps(exercise.form);
+    const keys = new Set(steps.map((step) => step.key));
+    for (const required of REQUIRED_FORM_GUIDANCE_KEYS) {
+      assert.ok(keys.has(required), `${exercise.slug} form guidance includes ${required}`);
+    }
+  }
+
+  // Substitutions must reference real exercises and never point at themselves.
+  for (const substitution of KNOWLEDGE_SUBSTITUTIONS) {
+    assert.ok(exerciseSlugs.has(substitution.exercise), `substitution source ${substitution.exercise}`);
+    assert.ok(exerciseSlugs.has(substitution.substitute), `substitution target ${substitution.substitute}`);
+    assert.notEqual(substitution.exercise, substitution.substitute, "no self substitution");
+    assert.ok(substitution.reason.length > 0, "substitution carries a reason");
   }
 
   // Every major muscle group used by training logic has a fixture muscle.

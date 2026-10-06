@@ -13,6 +13,14 @@ export type GoalId = EntityId;
 export type EquipmentId = EntityId;
 export type ExerciseId = EntityId;
 export type MuscleId = EntityId;
+/** A head/region/portion of a muscle — see `./anatomy`. */
+export type MuscleStructureId = EntityId;
+/** A structured form-guidance version of one exercise variation. */
+export type ExerciseFormVersionId = EntityId;
+/** An instructional media asset reference (metadata only, never a binary). */
+export type ExerciseMediaId = EntityId;
+/** A timed user→exercise preference interval. */
+export type UserExercisePreferenceId = EntityId;
 export type TrainingPlanId = EntityId;
 export type WorkoutId = EntityId;
 export type BodyMeasurementId = EntityId;

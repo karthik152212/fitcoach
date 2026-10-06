@@ -18,7 +18,8 @@
   "dependencies": {
     "@fitcoach/db": "*",
     "@fitcoach/domain": "*",
-    "@fitcoach/nutrition": "*"
+    "@fitcoach/nutrition": "*",
+    "@fitcoach/fitness-core": "*"
   },
   "devDependencies": {
     "embedded-postgres": "^17.5.0-beta.15"

@@ -1,5 +1,9 @@
 import type { PrismaClient, Prisma } from "@prisma/client";
-import type { CalendarDate, EquipmentCategory } from "@fitcoach/domain";
+import type {
+  CalendarDate,
+  EquipmentAvailability,
+  EquipmentCategory,
+} from "@fitcoach/domain";
 import { ConflictError, ConstraintValidationError, NotFoundError } from "../errors";
 import { newUuidv7 } from "../ids";
 import { toCalendarDate, toTimestamp } from "../mapping";
@@ -33,6 +37,7 @@ interface UserEquipmentRow {
   specifications: unknown;
   validFrom: Date;
   validTo: Date | null;
+  availability: string;
   createdAt: Date;
   updatedAt: Date;
   equipment: EquipmentRow;
@@ -48,6 +53,8 @@ export interface UserEquipmentRecord {
   validFrom: CalendarDate;
   /** User-local day availability ends (exclusive); absent = still available. */
   validTo?: CalendarDate;
+  /** Usability while this row is open ("the machine is busy"). */
+  availability: EquipmentAvailability;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,6 +83,7 @@ function userEquipmentRowToRecord(row: UserEquipmentRow): UserEquipmentRecord {
         : undefined,
     validFrom: toCalendarDate(row.validFrom),
     validTo: row.validTo ? toCalendarDate(row.validTo) : undefined,
+    availability: (row.availability ?? "available") as EquipmentAvailability,
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
   };
@@ -96,6 +104,7 @@ export interface AddUserEquipmentInput {
   specifications?: Record<string, unknown>;
   validFrom: CalendarDate;
   validTo?: CalendarDate;
+  availability?: EquipmentAvailability;
 }
 
 export interface EquipmentRepository {
@@ -178,6 +187,7 @@ export class PrismaEquipmentRepository implements EquipmentRepository {
             specifications: (input.specifications ?? undefined) as Prisma.InputJsonValue | undefined,
             validFrom,
             validTo,
+            availability: input.availability ?? "available",
           },
           include: { equipment: true },
         });

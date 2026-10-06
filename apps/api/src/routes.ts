@@ -1,4 +1,5 @@
-import type { Profile } from "@fitcoach/domain";
+import { MOVEMENT_PATTERNS } from "@fitcoach/domain";
+import type { MovementFunction, Profile } from "@fitcoach/domain";
 import { buildExampleUser, createUserSummary } from "./example";
 import type { AppServices } from "./services";
 import type { Router } from "./http";
@@ -99,6 +100,22 @@ const OUTCOME_VERDICTS = [
   "too_early",
 ] as const;
 const PLAN_STATUSES = ["draft", "active", "paused", "retired"] as const;
+const EXERCISE_CATEGORIES = [
+  "compound",
+  "isolation",
+  "conditioning",
+  "mobility",
+  "other",
+] as const;
+const EXERCISE_PREFERENCE_KINDS = ["preferred", "neutral", "disliked", "excluded"] as const;
+const SUBSTITUTION_TRIGGERS = [
+  "generic",
+  "equipment_missing",
+  "equipment_changed",
+  "machine_busy",
+  "disliked",
+] as const;
+
 const BODY_SITES = [
   "neck",
   "shoulders",
@@ -112,6 +129,25 @@ const BODY_SITES = [
   "left_calf",
   "right_calf",
 ] as const;
+
+/**
+ * Project query parameters onto a plain object so the shared validation helpers
+ * can be reused for GET requests. List-shaped parameters (any key ending in
+ * `Ids` or `Slugs`) accept both repeated values and comma-separated values,
+ * because both appear in real clients.
+ */
+function queryToBody(query: URLSearchParams): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  for (const [key, value] of query.entries()) {
+    if (key.endsWith("Ids") || key.endsWith("Slugs")) {
+      const existing = Array.isArray(body[key]) ? (body[key] as string[]) : [];
+      body[key] = [...existing, ...value.split(",").map((item) => item.trim()).filter(Boolean)];
+    } else {
+      body[key] = value;
+    }
+  }
+  return body;
+}
 
 function queryNumber(query: URLSearchParams, key: string, min: number, max: number): number | undefined {
   const raw = query.get(key);
@@ -1004,4 +1040,176 @@ export function registerRoutes(router: Router, services: AppServices): void {
       body: { outcomes: await services.coaching.listOutcomes(params["interventionId"]!) },
     }),
   );
+
+  // -------------------------------------------------------------------------
+  // Exercise knowledge (Phase 2)
+  //
+  // Thin handlers: validate, delegate to the knowledge service, shape the
+  // response. No scoring, ranking, overlap maths or anatomy logic lives here —
+  // that is deterministic code in packages/fitness-core, where it can be
+  // tested without a database and cited as evidence.
+  // -------------------------------------------------------------------------
+
+  function optionalCalendarDate(query: URLSearchParams): string | undefined {
+    const at = query.get("at");
+    if (at === null || at === "") return undefined;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(at)) {
+      throw new RouteError(400, "validation_failed", "query parameter at must be YYYY-MM-DD");
+    }
+    return at;
+  }
+
+  router.add("GET", "/v0/muscles", async ({ query }) => ({
+    body: {
+      muscles: await services.knowledge.muscleCatalog({
+        includeInactive: query.get("includeInactive") === "true",
+      }),
+    },
+  }));
+
+  router.add("GET", "/v0/muscles/:muscleId", async ({ params }) => ({
+    body: { muscle: await services.knowledge.muscleById(params["muscleId"]!) },
+  }));
+
+  router.add("GET", "/v0/movement-functions", async () => ({
+    body: { movementFunctions: await services.knowledge.movementFunctions() },
+  }));
+
+  router.add("GET", "/v0/exercises", async ({ query }) => {
+    const body = queryToBody(query);
+    const q = optionalString(body, "q", { maxLength: 200 });
+    const muscleSlug = optionalString(body, "muscleSlug", { maxLength: 120 });
+    const structureSlug = optionalString(body, "structureSlug", { maxLength: 120 });
+    const category = optionalEnum(body, "category", EXERCISE_CATEGORIES);
+    const movementPattern = optionalEnum(body, "movementPattern", MOVEMENT_PATTERNS);
+    const equipmentIds = optionalStringArray(body, "equipmentIds", { maxItems: 20 });
+
+    const exercises = await services.knowledge.searchExercises({
+      ...(q !== undefined ? { q } : {}),
+      ...(muscleSlug !== undefined ? { muscleSlug } : {}),
+      ...(structureSlug !== undefined ? { structureSlug } : {}),
+      ...(category !== undefined ? { category } : {}),
+      ...(movementPattern !== undefined ? { movementPattern } : {}),
+      ...(equipmentIds !== undefined ? { equipmentIds } : {}),
+      includeInactive: query.get("includeInactive") === "true",
+    });
+    return { body: { exercises } };
+  });
+
+  router.add("GET", "/v0/exercises/:exerciseId", async ({ params, query }) => {
+    const detail = await services.knowledge.exerciseDetail(params["exerciseId"]!, {
+      includeRetiredMedia: query.get("includeRetiredMedia") === "true",
+    });
+    return { body: detail };
+  });
+
+  router.add("GET", "/v0/exercises/:exerciseId/target-map", async ({ params }) => ({
+    body: { targetMap: (await services.knowledge.exerciseDetail(params["exerciseId"]!)).targetMap },
+  }));
+
+  router.add("GET", "/v0/exercises/:exerciseId/form-guidance", async ({ params }) => ({
+    body: { formGuidance: (await services.knowledge.exerciseDetail(params["exerciseId"]!)).formGuidance },
+  }));
+
+  router.add("GET", "/v0/exercises/:exerciseId/media", async ({ params, query }) => ({
+    body: {
+      media: await services.knowledge.mediaMetadata(
+        params["exerciseId"]!,
+        query.get("includeRetired") === "true",
+      ),
+    },
+  }));
+
+  router.add("GET", "/v0/users/:userId/exercise-universe", async ({ params, query }) => {
+    const body = queryToBody(query);
+    const at = optionalCalendarDate(query);
+    const targetMuscleSlugs = optionalStringArray(body, "targetMuscleSlugs", { maxItems: 40 });
+    const movementPattern = optionalEnum(body, "movementPattern", MOVEMENT_PATTERNS);
+    const movementFunction = optionalString(body, "movementFunction", { maxLength: 80 }) as
+      | MovementFunction
+      | undefined;
+    return {
+      body: {
+        universe: await services.knowledge.exerciseUniverse(params["userId"]!, {
+          ...(at !== undefined ? { at } : {}),
+          ...(targetMuscleSlugs !== undefined ? { targetMuscleSlugs } : {}),
+          ...(movementPattern !== undefined ? { movementPattern } : {}),
+          ...(movementFunction !== undefined ? { movementFunction } : {}),
+          includeUnavailable: query.get("includeUnavailable") === "true",
+          includeRetired: query.get("includeRetired") === "true",
+        }),
+      },
+    };
+  });
+
+  router.add("GET", "/v0/users/:userId/exercises/:exerciseId/decision", async ({ params, query }) => {
+    const body = queryToBody(query);
+    const at = optionalCalendarDate(query);
+    const targetMuscleSlugs = optionalStringArray(body, "targetMuscleSlugs", { maxItems: 40 });
+    const alongsideExerciseIds = optionalStringArray(body, "alongsideExerciseIds", { maxItems: 30 });
+    const goalKind = optionalEnum(body, "goalKind", GOAL_KINDS);
+    const trigger = optionalEnum(body, "trigger", SUBSTITUTION_TRIGGERS);
+    const limit = queryNumber(query, "limit", 1, 20);
+    return {
+      body: await services.knowledge.exerciseDecision(
+        params["userId"]!,
+        params["exerciseId"]!,
+        {
+          ...(at !== undefined ? { at } : {}),
+          ...(targetMuscleSlugs !== undefined ? { targetMuscleSlugs } : {}),
+          ...(alongsideExerciseIds !== undefined ? { alongsideExerciseIds } : {}),
+          ...(goalKind !== undefined ? { goalKind } : {}),
+          ...(trigger !== undefined ? { trigger } : {}),
+          ...(limit !== undefined ? { alternativeLimit: limit } : {}),
+          explain: query.get("explain") !== "false",
+        },
+      ),
+    };
+  });
+
+  router.add("POST", "/v0/users/:userId/exercise-preferences", async ({ params, body }) => {
+    const exerciseId = requiredUuid(body, "exerciseId");
+    const preference = requiredEnum(body, "preference", EXERCISE_PREFERENCE_KINDS);
+    const reason = optionalString(body, "reason", { maxLength: 1000 });
+    // The interval boundary is the user's local today, not the server's.
+    const localToday = await services.users.localToday(params["userId"]!);
+    const record = await services.knowledge.setExercisePreference(params["userId"]!, {
+      exerciseId,
+      preference,
+      ...(reason !== undefined ? { reason } : {}),
+      validFrom: localToday,
+    });
+    return { status: 201, body: { preference: record } };
+  });
+
+  router.add("GET", "/v0/users/:userId/exercise-preferences", async ({ params, query }) => {
+    const at = optionalCalendarDate(query);
+    return {
+      body: {
+        preferences: await services.knowledge.exercisePreferences(params["userId"]!, at),
+      },
+    };
+  });
+
+  router.add("POST", "/v0/users/:userId/muscle-coverage", async ({ params, body }) => {
+    const exerciseIds = optionalStringArray(body, "exerciseIds", { maxItems: 60 }) ?? [];
+    if (exerciseIds.length === 0) {
+      throw new RouteError(400, "validation_failed", "exerciseIds must be a non-empty array");
+    }
+    for (const id of exerciseIds) {
+      if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
+        throw new RouteError(400, "validation_failed", "exerciseIds must be UUIDs");
+      }
+    }
+    const focusMuscleSlugs = optionalStringArray(body, "focusMuscleSlugs", { maxItems: 40 });
+    const focusStructureIds = optionalStringArray(body, "focusStructureIds", { maxItems: 40 });
+    return {
+      body: {
+        coverage: await services.knowledge.muscleCoverage(params["userId"]!, exerciseIds, {
+          ...(focusMuscleSlugs !== undefined ? { focusMuscleSlugs } : {}),
+          ...(focusStructureIds !== undefined ? { focusStructureIds } : {}),
+        }),
+      },
+    };
+  });
 }

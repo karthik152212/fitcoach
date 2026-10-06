@@ -25,12 +25,16 @@ import type { GoalRepository } from "./goals";
 import { PrismaGoalRepository } from "./goals";
 import type { ProfileRepository, UserRepository } from "./identity";
 import { PrismaProfileRepository, PrismaUserRepository } from "./identity";
+import type { KnowledgeRepository } from "./knowledge";
+import { PrismaKnowledgeRepository } from "./knowledge";
 import type { FoodRepository, MealRepository, NutritionRepository } from "./nutrition";
 import {
   PrismaFoodRepository,
   PrismaMealRepository,
   PrismaNutritionRepository,
 } from "./nutrition";
+import type { ExercisePreferenceRepository } from "./preferences";
+import { PrismaExercisePreferenceRepository } from "./preferences";
 import type { TrainingPlanRepository, WorkoutRepository } from "./training";
 import { PrismaTrainingPlanRepository, PrismaWorkoutRepository } from "./training";
 
@@ -40,7 +44,9 @@ export * from "./coaching";
 export * from "./equipment";
 export * from "./goals";
 export * from "./identity";
+export * from "./knowledge";
 export * from "./nutrition";
+export * from "./preferences";
 export * from "./training";
 export { runDb, boundedLimit } from "./util";
 
@@ -54,6 +60,8 @@ export interface Repositories {
   goals: GoalRepository;
   equipment: EquipmentRepository;
   exercises: ExerciseRepository;
+  knowledge: KnowledgeRepository;
+  exercisePreferences: ExercisePreferenceRepository;
   trainingPlans: TrainingPlanRepository;
   workouts: WorkoutRepository;
   bodyMeasurements: BodyMeasurementRepository;
@@ -74,6 +82,8 @@ export function createRepositories(prisma: PrismaClient): Repositories {
     goals: new PrismaGoalRepository(prisma),
     equipment: new PrismaEquipmentRepository(prisma),
     exercises: new PrismaExerciseRepository(prisma),
+    knowledge: new PrismaKnowledgeRepository(prisma),
+    exercisePreferences: new PrismaExercisePreferenceRepository(prisma),
     trainingPlans: new PrismaTrainingPlanRepository(prisma),
     workouts: new PrismaWorkoutRepository(prisma),
     bodyMeasurements: new PrismaBodyMeasurementRepository(prisma),
