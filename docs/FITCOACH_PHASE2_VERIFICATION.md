@@ -4,6 +4,10 @@
 **Branch:** master
 **Scope:** Deterministic fitness knowledge engine (Phase 2 bounded milestone)
 
+> Historical record. Phase 3 (docs/FITCOACH_PHASE3_TRAINING_ENGINE.md)
+> implemented the planning modules this report listed as stubs; the sections
+> below are preserved as the Phase 2 snapshot, and §27 is annotated.
+
 ---
 
 ## Section 1: Objective
@@ -430,9 +434,10 @@ Form guidance is stored per structured slot, never as one paragraph:
 
 ---
 
-## Section 27: Phase 3 Planning Modules — Still Stubs
+## Section 27: Phase 3 Planning Modules — Still Stubs (annotated)
 
-The following modules intentionally throw `NotImplementedError`:
+At the Phase 2 checkpoint these modules intentionally threw
+`NotImplementedError`:
 - volume.computeTrainingVolume
 - progression.recommendProgression
 - splitGeneration.generateSplit
@@ -441,7 +446,11 @@ The following modules intentionally throw `NotImplementedError`:
 - diagnosis.runDiagnoses
 - interventionSelection.selectInterventionCandidates
 
-These are pinned by boundaries.test.ts to ensure they don't accidentally become implemented.
+Phase 3 update: the five training modules above are **implemented and tested**
+(`docs/FITCOACH_PHASE3_TRAINING_ENGINE.md`); `boundaries.test.ts` now asserts
+they are implemented and deterministic. `diagnosis.runDiagnoses` and
+`interventionSelection.selectInterventionCandidates` remain stubs and are still
+pinned by that test.
 
 ---
 

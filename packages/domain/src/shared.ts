@@ -22,7 +22,14 @@ export type ExerciseMediaId = EntityId;
 /** A timed user→exercise preference interval. */
 export type UserExercisePreferenceId = EntityId;
 export type TrainingPlanId = EntityId;
+export type TrainingPlanVersionId = EntityId;
+export type TrainingPlanSessionId = EntityId;
+export type TrainingPlanExerciseSlotId = EntityId;
 export type WorkoutId = EntityId;
+export type ProgressionRuleId = EntityId;
+export type PlanDecisionId = EntityId;
+export type AdaptationDecisionId = EntityId;
+export type PlateauSignalId = EntityId;
 export type BodyMeasurementId = EntityId;
 export type ActivityRecordId = EntityId;
 export type FoodId = EntityId;

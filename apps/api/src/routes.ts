@@ -1,11 +1,17 @@
 import { MOVEMENT_PATTERNS } from "@fitcoach/domain";
-import type { MovementFunction, Profile } from "@fitcoach/domain";
+import type {
+  MovementFunction,
+  PerformanceObservationSummary,
+  ProgressionActualChange,
+  Profile,
+} from "@fitcoach/domain";
 import { buildExampleUser, createUserSummary } from "./example";
 import type { AppServices } from "./services";
 import type { Router } from "./http";
 import { RouteError } from "./http";
 import {
   asObject,
+  optionalBoolean,
   optionalDate,
   optionalEnum,
   optionalNumber,
@@ -100,6 +106,28 @@ const OUTCOME_VERDICTS = [
   "too_early",
 ] as const;
 const PLAN_STATUSES = ["draft", "active", "paused", "retired"] as const;
+// Phase 3.1 — training environment + performance/progression contracts
+const TRAINING_ENVIRONMENT_KINDS = [
+  "gym",
+  "home",
+  "home_no_equipment",
+  "home_limited_equipment",
+  "hotel",
+  "travel",
+  "outdoor",
+  "custom",
+] as const;
+const SESSION_CLASSIFICATIONS = ["planned", "adapted", "makeup", "unplanned"] as const;
+const PERFORMANCE_LOAD_KINDS = [
+  "external_load",
+  "bodyweight",
+  "weighted_bodyweight",
+  "assisted_bodyweight",
+  "band",
+  "none",
+] as const;
+const PERFORMANCE_SOURCES = ["manual", "imported", "inferred"] as const;
+const PROGRESSION_DECISION_KINDS = ["recommended", "accepted", "rejected", "deferred"] as const;
 const EXERCISE_CATEGORIES = [
   "compound",
   "isolation",
@@ -595,8 +623,155 @@ export function registerRoutes(router: Router, services: AppServices): void {
     return { status: 201, body: { version } };
   });
 
+  // Ownership-checked (§41): a plan id alone must not expose another user's plan.
   router.add("GET", "/v0/users/:userId/training-plans/:planId", async ({ params }) => ({
-    body: { plan: await services.training.getPlan(params["planId"]!) },
+    body: { plan: await services.planner.getPlanForUser(params["userId"]!, params["planId"]!) },
+  }));
+
+  // -------------------------------------------------------------------------
+  // Adaptive training planner (Phase 3)
+  // -------------------------------------------------------------------------
+
+  /** Shared body parsing for generation: explicit days/duration/priorities. */
+  function parseGenerationCommand(body: Record<string, unknown>) {
+    const asOf = requiredDate(body, "asOf");
+    const planId = optionalUuid(body, "planId");
+    const name = optionalString(body, "name", { maxLength: 200 });
+    const goalId = optionalUuid(body, "goalId");
+    const goalKind = optionalEnum(body, "goalKind", GOAL_KINDS);
+    const priorities = optionalStringArray(body, "priorities", { maxItems: 20 });
+    // 0 is accepted on purpose: "no days available" is a modellable input that
+    // the planner answers with an explicit infeasibility, not a transport error.
+    const availableTrainingDays = optionalNumber(body, "availableTrainingDays", {
+      min: 0,
+      max: 7,
+      integer: true,
+    });
+    const maxSessionDurationMinutes = optionalNumber(body, "maxSessionDurationMinutes", {
+      min: 10,
+      max: 300,
+      integer: true,
+    });
+    const experience = optionalEnum(body, "experience", EXPERIENCE_VALUES);
+    const equipmentIds = optionalStringArray(body, "equipmentIds", { maxItems: 200 });
+    if (equipmentIds) {
+      for (const id of equipmentIds) {
+        if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
+          throw new RouteError(400, "validation_failed", "equipmentIds must be UUIDs");
+        }
+      }
+    }
+    return {
+      asOf,
+      ...(planId !== undefined ? { planId } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(goalId !== undefined ? { goalId } : {}),
+      ...(goalKind !== undefined ? { goalKind } : {}),
+      ...(priorities !== undefined ? { priorities } : {}),
+      ...(availableTrainingDays !== undefined ? { availableTrainingDays } : {}),
+      ...(maxSessionDurationMinutes !== undefined ? { maxSessionDurationMinutes } : {}),
+      ...(experience !== undefined ? { experience } : {}),
+      ...(equipmentIds !== undefined ? { equipmentIds } : {}),
+    };
+  }
+
+  router.add("POST", "/v0/users/:userId/training-plans/generate", async ({ params, body }) => {
+    const result = await services.planner.generatePlan(
+      params["userId"]!,
+      parseGenerationCommand(body),
+    );
+    // Infeasible requests are a modelled outcome, not a transport failure: the
+    // reasons travel with the 200 so the caller can explain the gap.
+    return { status: result.plan ? 201 : 200, body: result };
+  });
+
+  router.add(
+    "GET",
+    "/v0/users/:userId/training-plans/:planId/versions/:versionNumber",
+    async ({ params }) => {
+      const versionNumber = Number(params["versionNumber"]);
+      if (!Number.isInteger(versionNumber) || versionNumber < 1) {
+        throw new RouteError(400, "validation_failed", "versionNumber must be a positive integer");
+      }
+      const { version } = await services.planner.getVersion(
+        params["userId"]!,
+        params["planId"]!,
+        versionNumber,
+      );
+      return { body: { version } };
+    },
+  );
+
+  router.add(
+    "POST",
+    "/v0/users/:userId/training-plans/:planId/adapt",
+    async ({ params, body }) => {
+      const asOf = optionalDate(body, "asOf");
+      const result = await services.planner.adaptPlan(params["userId"]!, params["planId"]!, {
+        ...(asOf !== undefined ? { asOf } : {}),
+      });
+      return { body: result };
+    },
+  );
+
+  router.add("GET", "/v0/users/:userId/training-plans/:planId/compare", async ({ params, query }) => {
+    const from = queryNumber(query, "from", 1, 1_000_000);
+    const to = queryNumber(query, "to", 1, 1_000_000);
+    if (from === undefined || to === undefined || !Number.isInteger(from) || !Number.isInteger(to)) {
+      throw new RouteError(400, "validation_failed", "query parameters from and to must be version numbers");
+    }
+    return {
+      body: await services.planner.compareVersions(params["userId"]!, params["planId"]!, from, to),
+    };
+  });
+
+  function queryVersionNumber(query: URLSearchParams): number | undefined {
+    const value = queryNumber(query, "version", 1, 1_000_000);
+    if (value === undefined) return undefined;
+    if (!Number.isInteger(value)) {
+      throw new RouteError(400, "validation_failed", "query parameter version must be an integer");
+    }
+    return value;
+  }
+
+  router.add("GET", "/v0/users/:userId/training-plans/:planId/decisions", async ({ params, query }) => ({
+    body: {
+      decisions: await services.planner.listDecisions(
+        params["userId"]!,
+        params["planId"]!,
+        queryVersionNumber(query),
+      ),
+    },
+  }));
+
+  router.add("GET", "/v0/users/:userId/training-plans/:planId/constraints", async ({ params, query }) => ({
+    body: {
+      constraints: await services.planner.listConstraints(
+        params["userId"]!,
+        params["planId"]!,
+        queryVersionNumber(query),
+      ),
+    },
+  }));
+
+  router.add("GET", "/v0/users/:userId/training-plans/:planId/coverage", async ({ params, query }) => ({
+    body: await services.planner.getCoverage(
+      params["userId"]!,
+      params["planId"]!,
+      queryVersionNumber(query),
+    ),
+  }));
+
+  router.add("GET", "/v0/users/:userId/training-plans/:planId/progression", async ({ params, query }) => ({
+    body: await services.planner.getProgression(
+      params["userId"]!,
+      params["planId"]!,
+      queryVersionNumber(query),
+    ),
+  }));
+
+  router.add("GET", "/v0/users/:userId/training-state", async ({ params }) => ({
+    body: { trainingState: await services.planner.getTrainingState(params["userId"]!) },
   }));
 
   // -------------------------------------------------------------------------
@@ -613,6 +788,8 @@ export function registerRoutes(router: Router, services: AppServices): void {
     const endedAt = optionalTimestamp(body, "endedAt");
     const notes = optionalString(body, "notes", { maxLength: 4000 });
     const clientRequestId = optionalString(body, "clientRequestId", { maxLength: 200 });
+    const environmentKind = optionalEnum(body, "environmentKind", TRAINING_ENVIRONMENT_KINDS);
+    const sessionClassification = optionalEnum(body, "sessionClassification", SESSION_CLASSIFICATIONS);
     const workout = await services.training.createWorkout(userId, {
       ...(planId !== undefined ? { planId } : {}),
       ...(planVersionId !== undefined ? { planVersionId } : {}),
@@ -623,6 +800,8 @@ export function registerRoutes(router: Router, services: AppServices): void {
       ...(endedAt !== undefined ? { endedAt } : {}),
       ...(notes !== undefined ? { notes } : {}),
       ...(clientRequestId !== undefined ? { clientRequestId } : {}),
+      ...(environmentKind !== undefined ? { environmentKind } : {}),
+      ...(sessionClassification !== undefined ? { sessionClassification } : {}),
     });
     return { status: 201, body: { workout } };
   });
@@ -646,10 +825,35 @@ export function registerRoutes(router: Router, services: AppServices): void {
       const exerciseId = requiredUuid(body, "exerciseId");
       const position = optionalNumber(body, "position", { min: 0, max: 1000, integer: true });
       const notes = optionalString(body, "notes", { maxLength: 2000 });
+      // Phase 3.1: link the performed group to its planned slot and record any
+      // substitution explicitly (§26 — never silently swap an exercise).
+      const slotId = optionalUuid(body, "slotId");
+      const substitutedFromExerciseId = optionalUuid(body, "substitutedFromExerciseId");
+      const performanceSource = optionalEnum(body, "performanceSource", PERFORMANCE_SOURCES);
+      const substitutionReason = optionalString(body, "substitutionReason", {
+        maxLength: 500,
+      });
+      const hasOptions =
+        slotId !== undefined ||
+        substitutedFromExerciseId !== undefined ||
+        performanceSource !== undefined ||
+        substitutionReason !== undefined;
       const group = await services.training.recordExercise(params["workoutId"]!, {
         exerciseId,
         ...(position !== undefined ? { position } : {}),
         ...(notes !== undefined ? { notes } : {}),
+        ...(hasOptions
+          ? {
+              options: {
+                ...(slotId !== undefined ? { slotId } : {}),
+                ...(substitutedFromExerciseId !== undefined
+                  ? { substitutedFromExerciseId }
+                  : {}),
+                ...(performanceSource !== undefined ? { performanceSource } : {}),
+                ...(substitutionReason !== undefined ? { substitutionReason } : {}),
+              },
+            }
+          : {}),
       });
       return { status: 201, body: { workoutExercise: group } };
     },
@@ -668,6 +872,11 @@ export function registerRoutes(router: Router, services: AppServices): void {
     const rir = optionalNumber(body, "rir", { min: 0, max: 10 });
     const rpe = optionalNumber(body, "rpe", { min: 0, max: 10 });
     const notes = optionalString(body, "notes", { maxLength: 2000 });
+    // Phase 3.1: bodyweight work is load, not missing data (§4), and a retried
+    // submission must not record the set twice (§32).
+    const loadKind = optionalEnum(body, "loadKind", PERFORMANCE_LOAD_KINDS);
+    const assistanceLoadKg = optionalNumber(body, "assistanceLoadKg", { min: 0, max: 1000 });
+    const clientRequestId = optionalString(body, "clientRequestId", { maxLength: 200 });
 
     const set = await services.training.recordSet(params["workoutId"]!, {
       kind,
@@ -682,6 +891,9 @@ export function registerRoutes(router: Router, services: AppServices): void {
       ...(rir !== undefined ? { rir } : {}),
       ...(rpe !== undefined ? { rpe } : {}),
       ...(notes !== undefined ? { notes } : {}),
+      ...(loadKind !== undefined ? { loadKind } : {}),
+      ...(assistanceLoadKg !== undefined ? { assistanceLoadKg } : {}),
+      ...(clientRequestId !== undefined ? { clientRequestId } : {}),
     });
     return { status: 201, body: { set } };
   });
@@ -699,6 +911,273 @@ export function registerRoutes(router: Router, services: AppServices): void {
   router.add("GET", "/v0/users/:userId/workouts/:workoutId", async ({ params }) => ({
     body: { workout: await services.training.getWorkout(params["workoutId"]!) },
   }));
+
+  // -------------------------------------------------------------------------
+  // Training environments + continuity (Phase 3.1 §12–§25)
+  // -------------------------------------------------------------------------
+
+  router.add("POST", "/v0/users/:userId/training-environments", async ({ params, body }) => {
+    const kind = requiredEnum(body, "kind", TRAINING_ENVIRONMENT_KINDS);
+    const effectiveFrom = requiredDate(body, "effectiveFrom");
+    const effectiveTo = optionalDate(body, "effectiveTo");
+    const reason = optionalString(body, "reason", { maxLength: 500 });
+    const isTemporary = optionalBoolean(body, "isTemporary");
+    const notes = optionalString(body, "notes", { maxLength: 2000 });
+    const availableEquipmentIds = optionalStringArray(body, "availableEquipmentIds", {
+      maxItems: 200,
+    });
+    const unavailableEquipmentIds = optionalStringArray(body, "unavailableEquipmentIds", {
+      maxItems: 200,
+    });
+    const result = await services.continuity.setEnvironment(params["userId"]!, {
+      kind,
+      effectiveFrom,
+      ...(effectiveTo !== undefined ? { effectiveTo } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(isTemporary !== undefined ? { isTemporary } : {}),
+      ...(notes !== undefined ? { notes } : {}),
+      ...(availableEquipmentIds !== undefined ? { availableEquipmentIds } : {}),
+      ...(unavailableEquipmentIds !== undefined ? { unavailableEquipmentIds } : {}),
+    });
+    // A replayed submission is the same record, not a new one (§32).
+    return { status: result.replayed ? 200 : 201, body: result };
+  });
+
+  router.add("GET", "/v0/users/:userId/training-environments", async ({ params }) => ({
+    body: { periods: await services.continuity.listEnvironmentPeriods(params["userId"]!) },
+  }));
+
+  router.add(
+    "GET",
+    "/v0/users/:userId/training-environments/active",
+    async ({ params, query }) => {
+      const asOf = queryCalendarDate(query, "asOf") ?? new Date().toISOString().slice(0, 10);
+      return {
+        body: { environment: await services.continuity.resolveEnvironment(params["userId"]!, asOf) },
+      };
+    },
+  );
+
+  router.add(
+    "POST",
+    "/v0/users/:userId/training-environments/restore",
+    async ({ params, body }) => {
+      const asOf = optionalDate(body, "asOf") ?? new Date().toISOString().slice(0, 10);
+      return {
+        body: await services.continuity.restoreEnvironment(params["userId"]!, { asOf }),
+      };
+    },
+  );
+
+  router.add("GET", "/v0/users/:userId/training-continuity", async ({ params, query }) => {
+    const asOf = queryCalendarDate(query, "asOf");
+    return {
+      body: await services.continuity.continuity(params["userId"]!, {
+        ...(asOf !== undefined ? { asOf } : {}),
+      }),
+    };
+  });
+
+  // Generate a TEMPORARY environment-adapted plan from the active primary
+  // plan (§15). The primary plan itself is never touched (§21).
+  router.add(
+    "POST",
+    "/v0/users/:userId/training-plans/generate-temporary",
+    async ({ params, body }) => {
+      const parsed = parseGenerationCommand(body);
+      const { planId: _planId, ...command } = parsed;
+      const effectiveUntil = optionalDate(body, "effectiveUntil");
+      const result = await services.planner.generateTemporaryPlan(params["userId"]!, {
+        ...command,
+        ...(effectiveUntil !== undefined ? { effectiveUntil } : {}),
+      });
+      const created = result.needed && result.result?.plan !== undefined;
+      return { status: created ? 201 : 200, body: result };
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Performance history + progression ledger (Phase 3.1 §3–§11)
+  // -------------------------------------------------------------------------
+
+  router.add("GET", "/v0/users/:userId/performance-history", async ({ params, query }) => {
+    const exerciseId = query.get("exerciseId");
+    if (exerciseId && !/^[0-9a-fA-F-]{36}$/.test(exerciseId)) {
+      throw new RouteError(400, "validation_failed", "query parameter exerciseId must be a UUID");
+    }
+    const limit = queryNumber(query, "limit", 1, 500);
+    return {
+      body: await services.continuity.performanceHistory(params["userId"]!, {
+        ...(exerciseId ? { exerciseId } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      }),
+    };
+  });
+
+  // Deterministic progression evaluation; idempotent on the evidence
+  // fingerprint, so replaying the same evidence returns the same evaluation.
+  router.add("POST", "/v0/users/:userId/progression/evaluate", async ({ params, body }) => {
+    const exerciseId = requiredUuid(body, "exerciseId");
+    const planId = optionalUuid(body, "planId");
+    const slotId = optionalUuid(body, "slotId");
+    const asOf = optionalDate(body, "asOf");
+    const targetRaw = optionalPlainObject(body, "target");
+    let target:
+      | { repMin?: number; repMax?: number; targetRir?: number }
+      | undefined;
+    if (targetRaw) {
+      const repMin = optionalNumber(targetRaw, "repMin", { min: 1, max: 100, integer: true });
+      const repMax = optionalNumber(targetRaw, "repMax", { min: 1, max: 100, integer: true });
+      const targetRir = optionalNumber(targetRaw, "targetRir", { min: 0, max: 10 });
+      if (repMin !== undefined && repMax !== undefined && repMin > repMax) {
+        throw new RouteError(400, "validation_failed", "target.repMin must not exceed target.repMax");
+      }
+      target = {
+        ...(repMin !== undefined ? { repMin } : {}),
+        ...(repMax !== undefined ? { repMax } : {}),
+        ...(targetRir !== undefined ? { targetRir } : {}),
+      };
+    }
+    const result = await services.continuity.evaluateProgression(params["userId"]!, {
+      exerciseId,
+      ...(planId !== undefined ? { planId } : {}),
+      ...(slotId !== undefined ? { slotId } : {}),
+      ...(asOf !== undefined ? { asOf } : {}),
+      ...(target ? { target } : {}),
+    });
+    // "Nothing to evaluate" is a modelled outcome, not a transport failure.
+    return { status: 200, body: result };
+  });
+
+  router.add("GET", "/v0/users/:userId/progression/ledger", async ({ params, query }) => {
+    const exerciseId = query.get("exerciseId");
+    if (exerciseId && !/^[0-9a-fA-F-]{36}$/.test(exerciseId)) {
+      throw new RouteError(400, "validation_failed", "query parameter exerciseId must be a UUID");
+    }
+    const planId = query.get("planId");
+    if (planId && !/^[0-9a-fA-F-]{36}$/.test(planId)) {
+      throw new RouteError(400, "validation_failed", "query parameter planId must be a UUID");
+    }
+    const planVersionId = query.get("planVersionId");
+    if (planVersionId && !/^[0-9a-fA-F-]{36}$/.test(planVersionId)) {
+      throw new RouteError(
+        400,
+        "validation_failed",
+        "query parameter planVersionId must be a UUID",
+      );
+    }
+    const limit = queryNumber(query, "limit", 1, 500);
+    const view = await services.continuity.getLedgerView(params["userId"]!, {
+      ...(exerciseId ? { exerciseId } : {}),
+      ...(planId ? { planId } : {}),
+      ...(planVersionId ? { planVersionId } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    return { body: view };
+  });
+
+  // Record what the user did about a recommendation: accepted / rejected /
+  // deferred, optionally with the actual change and the resulting performance.
+  // The idempotency key is REQUIRED so a retry never duplicates history (§32).
+  router.add(
+    "POST",
+    "/v0/users/:userId/progression/ledger/:evaluationId/events",
+    async ({ params, body }) => {
+      const evaluationId = params["evaluationId"]!;
+      if (!/^[0-9a-fA-F-]{36}$/.test(evaluationId)) {
+        throw new RouteError(400, "validation_failed", "evaluationId must be a UUID");
+      }
+      const decision = requiredEnum(body, "decision", PROGRESSION_DECISION_KINDS);
+      const idempotencyKey = requiredString(body, "idempotencyKey", { maxLength: 200 });
+      const reason = optionalString(body, "reason", { maxLength: 1000 });
+      const evidence = optionalStringArray(body, "evidence", { maxItems: 50 });
+      const actualChangeRaw = optionalPlainObject(body, "actualChange");
+      const resultingPerformanceRaw = optionalPlainObject(body, "resultingPerformance");
+
+      let actualChange: ProgressionActualChange | undefined;
+      if (actualChangeRaw) {
+        const changeKind = requiredEnum(
+          actualChangeRaw,
+          "kind",
+          ["load", "added_load", "reps", "variation", "none"] as const,
+        );
+        const loadDeltaKg = optionalNumber(actualChangeRaw, "loadDeltaKg", { min: -1000, max: 1000 });
+        const addedLoadDeltaKg = optionalNumber(actualChangeRaw, "addedLoadDeltaKg", {
+          min: -1000,
+          max: 1000,
+        });
+        const repsDelta = optionalNumber(actualChangeRaw, "repsDelta", {
+          min: -1000,
+          max: 1000,
+          integer: true,
+        });
+        const fromExerciseId = optionalUuid(actualChangeRaw, "fromExerciseId");
+        const toExerciseId = optionalUuid(actualChangeRaw, "toExerciseId");
+        actualChange = {
+          kind: changeKind,
+          ...(loadDeltaKg !== undefined ? { loadDeltaKg } : {}),
+          ...(addedLoadDeltaKg !== undefined ? { addedLoadDeltaKg } : {}),
+          ...(repsDelta !== undefined ? { repsDelta } : {}),
+          ...(fromExerciseId !== undefined ? { fromExerciseId } : {}),
+          ...(toExerciseId !== undefined ? { toExerciseId } : {}),
+        };
+      }
+
+      let resultingPerformance: PerformanceObservationSummary | undefined;
+      if (resultingPerformanceRaw) {
+        const loadKind = requiredEnum(
+          resultingPerformanceRaw,
+          "loadKind",
+          PERFORMANCE_LOAD_KINDS,
+        );
+        const localDate = requiredDate(resultingPerformanceRaw, "localDate");
+        const loadKg = optionalNumber(resultingPerformanceRaw, "loadKg", { min: 0, max: 1000 });
+        const addedLoadKg = optionalNumber(resultingPerformanceRaw, "addedLoadKg", {
+          min: 0,
+          max: 1000,
+        });
+        const assistanceKg = optionalNumber(resultingPerformanceRaw, "assistanceKg", {
+          min: 0,
+          max: 1000,
+        });
+        const reps = optionalNumber(resultingPerformanceRaw, "reps", {
+          min: 0,
+          max: 1000,
+          integer: true,
+        });
+        const rir = optionalNumber(resultingPerformanceRaw, "rir", { min: 0, max: 10 });
+        const environmentKind = optionalEnum(
+          resultingPerformanceRaw,
+          "environmentKind",
+          TRAINING_ENVIRONMENT_KINDS,
+        );
+        resultingPerformance = {
+          loadKind,
+          localDate,
+          ...(loadKg !== undefined ? { loadKg } : {}),
+          ...(addedLoadKg !== undefined ? { addedLoadKg } : {}),
+          ...(assistanceKg !== undefined ? { assistanceKg } : {}),
+          ...(reps !== undefined ? { reps } : {}),
+          ...(rir !== undefined ? { rir } : {}),
+          ...(environmentKind !== undefined ? { environmentKind } : {}),
+        };
+      }
+
+      const result = await services.continuity.recordProgressionDecision(
+        params["userId"]!,
+        {
+          evaluationId,
+          decision,
+          idempotencyKey,
+          ...(reason !== undefined ? { reason } : {}),
+          ...(evidence !== undefined ? { evidence } : {}),
+          ...(actualChange ? { actualChange } : {}),
+          ...(resultingPerformance ? { resultingPerformance } : {}),
+        },
+      );
+      return { status: result.replayed ? 200 : 201, body: result };
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Activity

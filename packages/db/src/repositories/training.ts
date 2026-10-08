@@ -2,9 +2,13 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import type {
   CalendarDate,
   ExerciseSlot,
+  PerformanceLoadKind,
+  PerformanceSource,
+  SessionClassification,
   SessionTemplate,
   SetKind,
   Timestamp,
+  TrainingEnvironmentKind,
   WorkoutStatus,
 } from "@fitcoach/domain";
 import { ConflictError, ImmutableRecordError, NotFoundError } from "../errors";
@@ -22,6 +26,10 @@ interface PlanRow {
   name: string;
   status: string;
   notes: string | null;
+  kind: string;
+  environmentKind: string | null;
+  effectiveUntil: Date | null;
+  temporaryForVersionId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,6 +41,11 @@ interface PlanVersionRow {
   startsOn: Date;
   endsOn: Date | null;
   rationaleNotes: string | null;
+  lifecycleStatus: string;
+  generationReason: string | null;
+  parentVersionId: string | null;
+  supersededAt: Date | null;
+  configVersion: string | null;
   createdAt: Date;
 }
 
@@ -65,6 +78,12 @@ export interface PlanVersionRecord {
   startsOn: CalendarDate;
   endsOn?: CalendarDate;
   rationaleNotes?: string;
+  /** Phase 3 lifecycle: only this and `supersededAt` may ever change. */
+  lifecycleStatus: string;
+  generationReason?: PlanGenerationReason;
+  parentVersionId?: string;
+  supersededAt?: Timestamp;
+  configVersion?: string;
   createdAt: string;
   sessions: SessionTemplate[];
 }
@@ -75,6 +94,14 @@ export interface PlanAggregate {
   name: string;
   status: string;
   notes?: string;
+  /** `primary` or `temporary_environment` (Phase 3.1 §21). */
+  kind: string;
+  /** Environment the plan is intended for; absent = gym default. */
+  environmentKind?: string;
+  /** Last user-local day a temporary plan applies (inclusive). */
+  effectiveUntil?: CalendarDate;
+  /** Plan version a temporary plan was adapted from. */
+  temporaryForVersionId?: string;
   createdAt: string;
   updatedAt: string;
   versions: PlanVersionRecord[];
@@ -125,6 +152,11 @@ function versionRowToRecord(row: PlanVersionWithSessions): PlanVersionRecord {
     startsOn: toCalendarDate(row.startsOn),
     endsOn: row.endsOn ? toCalendarDate(row.endsOn) : undefined,
     rationaleNotes: row.rationaleNotes ?? undefined,
+    lifecycleStatus: row.lifecycleStatus,
+    generationReason: (row.generationReason as PlanGenerationReason | null) ?? undefined,
+    parentVersionId: row.parentVersionId ?? undefined,
+    supersededAt: row.supersededAt ? toTimestamp(row.supersededAt) : undefined,
+    configVersion: row.configVersion ?? undefined,
     createdAt: toTimestamp(row.createdAt),
     sessions: row.sessions
       .slice()
@@ -144,6 +176,10 @@ function planRowToRecord(row: PlanWithVersions): PlanAggregate {
     name: row.name,
     status: row.status,
     notes: row.notes ?? undefined,
+    kind: row.kind ?? "primary",
+    ...(row.environmentKind ? { environmentKind: row.environmentKind } : {}),
+    ...(row.effectiveUntil ? { effectiveUntil: toCalendarDate(row.effectiveUntil) } : {}),
+    ...(row.temporaryForVersionId ? { temporaryForVersionId: row.temporaryForVersionId } : {}),
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
     versions: row.versions.slice().sort((a, b) => a.versionNumber - b.versionNumber).map(versionRowToRecord),
@@ -178,6 +214,8 @@ interface WorkoutRow {
   endedAt: Date | null;
   notes: string | null;
   clientRequestId: string | null;
+  environmentKind: string | null;
+  sessionClassification: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -195,6 +233,9 @@ interface SetRow {
   rir: unknown;
   rpe: unknown;
   notes: string | null;
+  loadKind: string | null;
+  assistanceLoadKg: unknown;
+  clientRequestId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -205,6 +246,10 @@ interface WorkoutExerciseRow {
   exerciseId: string;
   position: number;
   notes: string | null;
+  slotId: string | null;
+  substitutedFromExerciseId: string | null;
+  performanceSource: string | null;
+  substitutionReason: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -222,6 +267,12 @@ export interface ExerciseSetRecord {
   durationSeconds?: number;
   rir?: number;
   rpe?: number;
+  /** Phase 3.1: declared or inferred load kind. */
+  loadKind?: PerformanceLoadKind;
+  /** Assistance that reduced effective load (assisted pull-ups, etc.). */
+  assistanceLoadKg?: number;
+  /** Set-level idempotency key. */
+  clientRequestId?: string;
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -233,6 +284,12 @@ export interface WorkoutExerciseRecord {
   exerciseId: string;
   position: number;
   notes?: string;
+  /** Planned slot this group fulfilled (Phase 3.1 link). */
+  slotId?: string;
+  /** Exercise this one replaced, when performed as a substitution. */
+  substitutedFromExerciseId?: string;
+  performanceSource?: PerformanceSource;
+  substitutionReason?: string;
   sets: ExerciseSetRecord[];
   createdAt: string;
   updatedAt: string;
@@ -250,6 +307,10 @@ export interface WorkoutRecord {
   endedAt?: Timestamp;
   notes?: string;
   clientRequestId?: string;
+  /** Environment the session was actually performed in. */
+  environmentKind?: TrainingEnvironmentKind;
+  /** planned | adapted | makeup | unplanned. */
+  sessionClassification?: SessionClassification;
   createdAt: string;
   updatedAt: string;
 }
@@ -273,6 +334,11 @@ function setRowToRecord(row: SetRow, exerciseId: string): ExerciseSetRecord {
     durationSeconds: row.durationSeconds ?? undefined,
     rir: decimalToNumber(row.rir),
     rpe: decimalToNumber(row.rpe),
+    ...(row.loadKind ? { loadKind: row.loadKind as PerformanceLoadKind } : {}),
+    ...(decimalToNumber(row.assistanceLoadKg) !== undefined
+      ? { assistanceLoadKg: decimalToNumber(row.assistanceLoadKg) }
+      : {}),
+    ...(row.clientRequestId ? { clientRequestId: row.clientRequestId } : {}),
     notes: row.notes ?? undefined,
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
@@ -290,6 +356,14 @@ function workoutExerciseRowToRecord(row: WorkoutExerciseWithSets): WorkoutExerci
     exerciseId: row.exerciseId,
     position: row.position,
     notes: row.notes ?? undefined,
+    ...(row.slotId ? { slotId: row.slotId } : {}),
+    ...(row.substitutedFromExerciseId
+      ? { substitutedFromExerciseId: row.substitutedFromExerciseId }
+      : {}),
+    ...(row.performanceSource
+      ? { performanceSource: row.performanceSource as PerformanceSource }
+      : {}),
+    ...(row.substitutionReason ? { substitutionReason: row.substitutionReason } : {}),
     sets: row.sets
       .slice()
       .sort((a, b) => a.position - b.position)
@@ -312,9 +386,39 @@ function workoutRowToRecord(row: WorkoutRow): WorkoutRecord {
     endedAt: row.endedAt ? toTimestamp(row.endedAt) : undefined,
     notes: row.notes ?? undefined,
     clientRequestId: row.clientRequestId ?? undefined,
+    ...(row.environmentKind
+      ? { environmentKind: row.environmentKind as TrainingEnvironmentKind }
+      : {}),
+    ...(row.sessionClassification
+      ? { sessionClassification: row.sessionClassification as SessionClassification }
+      : {}),
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
   };
+}
+
+/**
+ * Infer the load kind from the recorded columns so a bodyweight set is stored
+ * as bodyweight rather than as "no load". Mirrors the domain contract in
+ * `@fitcoach/fitness-core` (`inferLoadKind`) without importing it, because the
+ * persistence layer must not depend on the engine package.
+ */
+function inferLoadKindFromColumns(input: {
+  loadKg?: number;
+  addedLoadKg?: number;
+  assistanceLoadKg?: number;
+  reps?: number;
+  distanceMeters?: number;
+  durationSeconds?: number;
+}): PerformanceLoadKind {
+  if (input.assistanceLoadKg !== undefined) return "assisted_bodyweight";
+  if (input.loadKg !== undefined && input.addedLoadKg !== undefined) return "weighted_bodyweight";
+  if (input.loadKg !== undefined) return "external_load";
+  if (input.addedLoadKg !== undefined) return "weighted_bodyweight";
+  if ((input.reps ?? 0) > 0 || (input.distanceMeters ?? 0) > 0 || (input.durationSeconds ?? 0) > 0) {
+    return "bodyweight";
+  }
+  return "none";
 }
 
 interface WorkoutWithExercises extends WorkoutRow {
@@ -364,6 +468,12 @@ export interface PlanVersionInput {
   startsOn: CalendarDate;
   endsOn?: CalendarDate;
   rationaleNotes?: string;
+  /** Why this version exists (Phase 3); defaults to `plan_adjustment`. */
+  generationReason?: PlanGenerationReason;
+  /** Previous version this one supersedes; defaults to the current active one. */
+  parentVersionId?: string;
+  /** Training configuration version that produced this content. */
+  configVersion?: string;
   sessions: readonly PlanSessionInput[];
 }
 
@@ -373,17 +483,113 @@ export interface CreatePlanInput {
   name: string;
   status?: string;
   notes?: string;
+  /** `primary` (default) or `temporary_environment` (Phase 3.1 §21). */
+  kind?: "primary" | "temporary_environment";
+  environmentKind?: string;
+  /** Required (with `temporaryForVersionId`) when `kind` is temporary. */
+  effectiveUntil?: CalendarDate;
+  temporaryForVersionId?: string;
   version: PlanVersionInput;
+}
+
+/** Why a new plan version was created (Phase 3 §3). */
+export type PlanGenerationReason =
+  | "initial_plan"
+  | "plan_adjustment"
+  | "exercise_substitution"
+  | "volume_adjustment"
+  | "frequency_adjustment"
+  | "split_adjustment"
+  | "progression_adjustment"
+  | "no_change";
+
+/** The structured, reproducible decision behind a plan version (Phase 3 §23). */
+export interface PlanDecisionRecord {
+  id: string;
+  versionId: string;
+  decision: string;
+  reasonCodes: string[];
+  evidence: string;
+  satisfiedConstraints: string[];
+  violatedConstraints: string[];
+  affectedMuscles: string[];
+  affectedExercises: string[];
+  beforeSnapshot?: unknown;
+  afterSnapshot?: unknown;
+  confidence?: number;
+  assumptions: string[];
+  configVersion?: string;
+  createdAt: string;
+}
+
+export interface CreateDecisionInput {
+  versionId: string;
+  decision: string;
+  reasonCodes?: readonly string[];
+  evidence: string;
+  satisfiedConstraints?: readonly string[];
+  violatedConstraints?: readonly string[];
+  affectedMuscles?: readonly string[];
+  affectedExercises?: readonly string[];
+  beforeSnapshot?: unknown;
+  afterSnapshot?: unknown;
+  confidence?: number;
+  assumptions?: readonly string[];
+  configVersion?: string;
+}
+
+/** One constraint evaluated for a version (Phase 3 §15). */
+export interface PlanConstraintInput {
+  constraintKey: string;
+  kind: string;
+  label: string;
+  isHard?: boolean;
+  result: "satisfied" | "violated" | "warning";
+  violationDetail?: string;
+  warningDetail?: string;
+}
+
+export interface PlanConstraintRecord extends PlanConstraintInput {
+  id: string;
+  versionId: string;
+}
+
+/** Deterministic progression rule attached to one planned slot (Phase 3 §19). */
+export interface ProgressionRuleInput {
+  trigger: string;
+  condition: string;
+  action: string;
+  bounds: string;
+  resetBehavior?: string;
+  rationale: string;
+  configVersion?: string;
+}
+
+export interface ProgressionRuleRecord extends ProgressionRuleInput {
+  id: string;
+  slotId: string;
 }
 
 export interface TrainingPlanRepository {
   create(input: CreatePlanInput): Promise<PlanAggregate>;
-  /** Appends version N+1 with frozen content (§7). */
+  /** Appends version N+1 with frozen content (§7); supersedes the active one. */
   addVersion(planId: string, version: PlanVersionInput): Promise<PlanVersionRecord>;
   findById(planId: string): Promise<PlanAggregate | null>;
   findActive(userId: string): Promise<PlanAggregate | null>;
   listForUser(userId: string): Promise<PlanAggregate[]>;
+  /** Temporary environment-adapted plans, newest first (Phase 3.1 §21). */
+  listTemporary(userId: string): Promise<PlanAggregate[]>;
   setStatus(planId: string, status: string): Promise<PlanAggregate>;
+  /** Appends the structured decision behind a version (Phase 3 §23). */
+  recordDecision(input: CreateDecisionInput): Promise<PlanDecisionRecord>;
+  /** Decisions for one version, oldest first — the auditable trail. */
+  listDecisions(versionId: string): Promise<PlanDecisionRecord[]>;
+  /** Replaces the version's constraint evaluation (delete + insert, §7). */
+  replaceConstraints(versionId: string, constraints: readonly PlanConstraintInput[]): Promise<PlanConstraintRecord[]>;
+  listConstraints(versionId: string): Promise<PlanConstraintRecord[]>;
+  /** Attaches (or replaces) the progression rule for one planned slot. */
+  setProgressionRule(slotId: string, rule: ProgressionRuleInput): Promise<ProgressionRuleRecord>;
+  listProgressionRules(versionId: string): Promise<ProgressionRuleRecord[]>;
 }
 
 function parseDate(value: CalendarDate): Date {
@@ -427,6 +633,94 @@ async function createVersionRows(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 rows: decisions, constraints, progression rules
+// ---------------------------------------------------------------------------
+
+function decisionRowToRecord(row: {
+  id: string;
+  versionId: string;
+  decision: string;
+  reasonCodes: string[];
+  evidence: string;
+  satisfiedConstraints: string[];
+  violatedConstraints: string[];
+  affectedMuscles: string[];
+  affectedExercises: string[];
+  beforeSnapshot: Prisma.JsonValue | null;
+  afterSnapshot: Prisma.JsonValue | null;
+  confidence: unknown;
+  assumptions: string[];
+  configVersion: string | null;
+  createdAt: Date;
+}): PlanDecisionRecord {
+  return {
+    id: row.id,
+    versionId: row.versionId,
+    decision: row.decision,
+    reasonCodes: [...row.reasonCodes],
+    evidence: row.evidence,
+    satisfiedConstraints: [...row.satisfiedConstraints],
+    violatedConstraints: [...row.violatedConstraints],
+    affectedMuscles: [...row.affectedMuscles],
+    affectedExercises: [...row.affectedExercises],
+    beforeSnapshot: row.beforeSnapshot ?? undefined,
+    afterSnapshot: row.afterSnapshot ?? undefined,
+    confidence: decimalToNumber(row.confidence),
+    assumptions: [...row.assumptions],
+    configVersion: row.configVersion ?? undefined,
+    createdAt: toTimestamp(row.createdAt),
+  };
+}
+
+function constraintRowToRecord(row: {
+  id: string;
+  versionId: string;
+  constraintKey: string;
+  kind: string;
+  label: string;
+  isHard: boolean;
+  result: string;
+  violationDetail: string | null;
+  warningDetail: string | null;
+}): PlanConstraintRecord {
+  return {
+    id: row.id,
+    versionId: row.versionId,
+    constraintKey: row.constraintKey,
+    kind: row.kind,
+    label: row.label,
+    isHard: row.isHard,
+    result: row.result as PlanConstraintInput["result"],
+    violationDetail: row.violationDetail ?? undefined,
+    warningDetail: row.warningDetail ?? undefined,
+  };
+}
+
+function ruleRowToRecord(row: {
+  id: string;
+  slotId: string;
+  trigger: string;
+  condition: string;
+  action: string;
+  bounds: string;
+  resetBehavior: string | null;
+  rationale: string;
+  configVersion: string | null;
+}): ProgressionRuleRecord {
+  return {
+    id: row.id,
+    slotId: row.slotId,
+    trigger: row.trigger,
+    condition: row.condition,
+    action: row.action,
+    bounds: row.bounds,
+    resetBehavior: row.resetBehavior ?? undefined,
+    rationale: row.rationale,
+    configVersion: row.configVersion ?? undefined,
+  };
+}
+
 export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -456,6 +750,10 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
             name: input.name,
             status: input.status ?? "draft",
             notes: input.notes ?? null,
+            kind: input.kind ?? "primary",
+            environmentKind: input.environmentKind ?? null,
+            effectiveUntil: input.effectiveUntil ? parseDate(input.effectiveUntil) : null,
+            temporaryForVersionId: input.temporaryForVersionId ?? null,
           },
         });
         await tx.trainingPlanVersion.create({
@@ -466,6 +764,10 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
             startsOn: parseDate(input.version.startsOn),
             endsOn: input.version.endsOn ? parseDate(input.version.endsOn) : null,
             rationaleNotes: input.version.rationaleNotes ?? null,
+            lifecycleStatus: "active",
+            generationReason: input.version.generationReason ?? "initial_plan",
+            parentVersionId: null,
+            configVersion: input.version.configVersion ?? null,
           },
         });
         await createVersionRows(tx, versionId, input.version);
@@ -504,6 +806,21 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
         });
         const nextNumber = (highest._max.versionNumber ?? 0) + 1;
 
+        // Phase 3: supersede the previously active version. Only the two
+        // lifecycle columns move — the old version's content stays frozen
+        // (trigger `training_plan_versions_lifecycle_only`).
+        const previousActive = await tx.trainingPlanVersion.findFirst({
+          where: { planId, lifecycleStatus: "active" },
+          orderBy: { versionNumber: "desc" },
+          select: { id: true },
+        });
+        if (previousActive) {
+          await tx.trainingPlanVersion.updateMany({
+            where: { id: previousActive.id },
+            data: { lifecycleStatus: "superseded", supersededAt: new Date() },
+          });
+        }
+
         await tx.trainingPlanVersion.create({
           data: {
             id: versionId,
@@ -512,6 +829,11 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
             startsOn: parseDate(version.startsOn),
             endsOn: version.endsOn ? parseDate(version.endsOn) : null,
             rationaleNotes: version.rationaleNotes ?? null,
+            lifecycleStatus: "active",
+            generationReason:
+              version.generationReason ?? (nextNumber === 1 ? "initial_plan" : "plan_adjustment"),
+            parentVersionId: version.parentVersionId ?? previousActive?.id ?? null,
+            configVersion: version.configVersion ?? null,
           },
         });
         await createVersionRows(tx, versionId, version);
@@ -543,8 +865,11 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
 
   async findActive(userId: string): Promise<PlanAggregate | null> {
     return runDb(async () => {
+      // Only the program of record: a temporary environment plan (Phase 3.1)
+      // must never become "the active plan" — the gym plan stays authoritative
+      // and is simply resumed when the environment changes back.
       const row = await this.prisma.trainingPlan.findFirst({
-        where: { userId, status: "active" },
+        where: { userId, status: "active", kind: "primary" },
         include: PLAN_INCLUDE,
       });
       return row ? planRowToRecord(row) : null;
@@ -562,6 +887,17 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
     });
   }
 
+  async listTemporary(userId: string): Promise<PlanAggregate[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlan.findMany({
+        where: { userId, kind: "temporary_environment" },
+        include: PLAN_INCLUDE,
+        orderBy: { createdAt: "desc" },
+      });
+      return rows.map(planRowToRecord);
+    });
+  }
+
   async setStatus(planId: string, status: string): Promise<PlanAggregate> {
     return runDb(async () => {
       await this.prisma.trainingPlan.update({ where: { id: planId }, data: { status } });
@@ -571,6 +907,134 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
       });
       if (!row) throw new NotFoundError(`training plan ${planId} not found`);
       return planRowToRecord(row);
+    });
+  }
+
+  async recordDecision(input: CreateDecisionInput): Promise<PlanDecisionRecord> {
+    const id = newUuidv7();
+    return runDb(async () => {
+      const version = await this.prisma.trainingPlanVersion.findUnique({
+        where: { id: input.versionId },
+        select: { id: true },
+      });
+      if (!version) throw new NotFoundError(`plan version ${input.versionId} not found`);
+
+      const row = await this.prisma.trainingPlanDecision.create({
+        data: {
+          id,
+          versionId: input.versionId,
+          decision: input.decision,
+          reasonCodes: [...(input.reasonCodes ?? [])],
+          evidence: input.evidence,
+          satisfiedConstraints: [...(input.satisfiedConstraints ?? [])],
+          violatedConstraints: [...(input.violatedConstraints ?? [])],
+          affectedMuscles: [...(input.affectedMuscles ?? [])],
+          affectedExercises: [...(input.affectedExercises ?? [])],
+          beforeSnapshot: (input.beforeSnapshot ?? undefined) as Prisma.InputJsonValue | undefined,
+          afterSnapshot: (input.afterSnapshot ?? undefined) as Prisma.InputJsonValue | undefined,
+          confidence: input.confidence,
+          assumptions: [...(input.assumptions ?? [])],
+          configVersion: input.configVersion ?? null,
+        },
+      });
+      return decisionRowToRecord(row);
+    });
+  }
+
+  async listDecisions(versionId: string): Promise<PlanDecisionRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlanDecision.findMany({
+        where: { versionId },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map(decisionRowToRecord);
+    });
+  }
+
+  async replaceConstraints(
+    versionId: string,
+    constraints: readonly PlanConstraintInput[],
+  ): Promise<PlanConstraintRecord[]> {
+    return runDb(async () => {
+      return this.prisma.$transaction(async (tx) => {
+        const version = await tx.trainingPlanVersion.findUnique({
+          where: { id: versionId },
+          select: { id: true },
+        });
+        if (!version) throw new NotFoundError(`plan version ${versionId} not found`);
+
+        // The table rejects updates, so a re-evaluation is delete + insert.
+        await tx.trainingPlanConstraint.deleteMany({ where: { versionId } });
+        for (const constraint of constraints) {
+          await tx.trainingPlanConstraint.create({
+            data: {
+              id: newUuidv7(),
+              versionId,
+              constraintKey: constraint.constraintKey,
+              kind: constraint.kind,
+              label: constraint.label,
+              isHard: constraint.isHard ?? true,
+              result: constraint.result,
+              violationDetail: constraint.violationDetail ?? null,
+              warningDetail: constraint.warningDetail ?? null,
+            },
+          });
+        }
+        const rows = await tx.trainingPlanConstraint.findMany({
+          where: { versionId },
+          orderBy: { constraintKey: "asc" },
+        });
+        return rows.map(constraintRowToRecord);
+      });
+    });
+  }
+
+  async listConstraints(versionId: string): Promise<PlanConstraintRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlanConstraint.findMany({
+        where: { versionId },
+        orderBy: { constraintKey: "asc" },
+      });
+      return rows.map(constraintRowToRecord);
+    });
+  }
+
+  async setProgressionRule(slotId: string, rule: ProgressionRuleInput): Promise<ProgressionRuleRecord> {
+    return runDb(async () => {
+      return this.prisma.$transaction(async (tx) => {
+        const slot = await tx.trainingPlanExerciseSlot.findUnique({
+          where: { id: slotId },
+          select: { id: true },
+        });
+        if (!slot) throw new NotFoundError(`plan slot ${slotId} not found`);
+
+        // Rules are frozen with their slot: replace rather than update.
+        await tx.trainingPlanProgressionRule.deleteMany({ where: { slotId } });
+        const row = await tx.trainingPlanProgressionRule.create({
+          data: {
+            id: newUuidv7(),
+            slotId,
+            trigger: rule.trigger,
+            condition: rule.condition,
+            action: rule.action,
+            bounds: rule.bounds,
+            resetBehavior: rule.resetBehavior ?? null,
+            rationale: rule.rationale,
+            configVersion: rule.configVersion ?? null,
+          },
+        });
+        return ruleRowToRecord(row);
+      });
+    });
+  }
+
+  async listProgressionRules(versionId: string): Promise<ProgressionRuleRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlanProgressionRule.findMany({
+        where: { slot: { session: { versionId } } },
+        orderBy: { slotId: "asc" },
+      });
+      return rows.map(ruleRowToRecord);
     });
   }
 }
@@ -592,6 +1056,10 @@ export interface CreateWorkoutInput {
   notes?: string;
   /** Idempotency key (§15): a retry with the same key returns the same row. */
   clientRequestId?: string;
+  /** Environment the session was performed in (Phase 3.1). */
+  environmentKind?: TrainingEnvironmentKind;
+  /** planned | adapted | makeup | unplanned. */
+  sessionClassification?: SessionClassification;
 }
 
 export interface AddSetInput {
@@ -606,7 +1074,23 @@ export interface AddSetInput {
   durationSeconds?: number;
   rir?: number;
   rpe?: number;
+  /** Explicit load kind; inferred from the columns when omitted. */
+  loadKind?: PerformanceLoadKind;
+  /** Assistance load for assisted bodyweight work. */
+  assistanceLoadKg?: number;
   notes?: string;
+  /** Set-level idempotency key (§32): replays return the same set. */
+  clientRequestId?: string;
+}
+
+/** Optional Phase 3.1 metadata for a workout-exercise group. */
+export interface AddExerciseOptions {
+  /** Planned slot this group fulfils. */
+  slotId?: string;
+  /** Exercise this one replaced, when performed as a substitution. */
+  substitutedFromExerciseId?: string;
+  performanceSource?: PerformanceSource;
+  substitutionReason?: string;
 }
 
 export interface WorkoutHistoryQuery {
@@ -619,7 +1103,13 @@ export interface WorkoutRepository {
   /** Idempotent on (userId, clientRequestId); returns the existing row on replay. */
   create(input: CreateWorkoutInput): Promise<WorkoutRecord>;
   /** Appends an exercise group; position defaults to the next slot. */
-  addExercise(workoutId: string, exerciseId: string, position?: number, notes?: string): Promise<WorkoutExerciseRecord>;
+  addExercise(
+    workoutId: string,
+    exerciseId: string,
+    position?: number,
+    notes?: string,
+    options?: AddExerciseOptions,
+  ): Promise<WorkoutExerciseRecord>;
   addSet(input: AddSetInput): Promise<ExerciseSetRecord>;
   /** Transitions an open workout to a final status. */
   complete(workoutId: string, status?: WorkoutStatus, endedAt?: Timestamp): Promise<WorkoutRecord>;
@@ -662,6 +1152,8 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
             endedAt: input.endedAt ? new Date(input.endedAt) : null,
             notes: input.notes ?? null,
             clientRequestId: input.clientRequestId ?? null,
+            environmentKind: input.environmentKind ?? null,
+            sessionClassification: input.sessionClassification ?? null,
           },
         });
         return workoutRowToRecord(row);
@@ -686,6 +1178,7 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
     exerciseId: string,
     position?: number,
     notes?: string,
+    options: AddExerciseOptions = {},
   ): Promise<WorkoutExerciseRecord> {
     return runDb(async () => {
       return this.prisma.$transaction(async (tx) => {
@@ -696,6 +1189,13 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
         }
         const exercise = await tx.exercise.findUnique({ where: { id: exerciseId } });
         if (!exercise) throw new NotFoundError(`exercise ${exerciseId} not found`);
+        if (options.slotId) {
+          const slot = await tx.trainingPlanExerciseSlot.findUnique({
+            where: { id: options.slotId },
+            select: { id: true },
+          });
+          if (!slot) throw new NotFoundError(`plan slot ${options.slotId} not found`);
+        }
 
         let targetPosition = position;
         if (targetPosition === undefined) {
@@ -711,6 +1211,10 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
               exerciseId,
               position: targetPosition,
               notes: notes ?? null,
+              slotId: options.slotId ?? null,
+              substitutedFromExerciseId: options.substitutedFromExerciseId ?? null,
+              performanceSource: options.performanceSource ?? null,
+              substitutionReason: options.substitutionReason ?? null,
             },
           });
           return {
@@ -719,6 +1223,14 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
             exerciseId: row.exerciseId,
             position: row.position,
             notes: row.notes ?? undefined,
+            ...(row.slotId ? { slotId: row.slotId } : {}),
+            ...(row.substitutedFromExerciseId
+              ? { substitutedFromExerciseId: row.substitutedFromExerciseId }
+              : {}),
+            ...(row.performanceSource
+              ? { performanceSource: row.performanceSource as PerformanceSource }
+              : {}),
+            ...(row.substitutionReason ? { substitutionReason: row.substitutionReason } : {}),
             sets: [],
             createdAt: toTimestamp(row.createdAt),
             updatedAt: toTimestamp(row.updatedAt),
@@ -752,12 +1264,27 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
           throw new ImmutableRecordError("workout is finished; its sets are frozen");
         }
 
+        // Set-level idempotency (§32): a retried submission returns the row it
+        // already wrote instead of recording the set twice.
+        if (input.clientRequestId) {
+          const existing = await tx.exerciseSet.findFirst({
+            where: {
+              workoutExerciseId: input.workoutExerciseId,
+              clientRequestId: input.clientRequestId,
+            },
+          });
+          if (existing) return setRowToRecord(existing, group.exerciseId);
+        }
+
         let position = input.position;
         if (position === undefined) {
           position = await tx.exerciseSet.count({
             where: { workoutExerciseId: input.workoutExerciseId },
           });
         }
+
+        const loadKind =
+          input.loadKind ?? inferLoadKindFromColumns(input);
 
         try {
           const row = await tx.exerciseSet.create({
@@ -774,6 +1301,9 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
               rir: input.rir ?? null,
               rpe: input.rpe ?? null,
               notes: input.notes ?? null,
+              loadKind,
+              assistanceLoadKg: input.assistanceLoadKg ?? null,
+              clientRequestId: input.clientRequestId ?? null,
             },
           });
           return setRowToRecord(row, group.exerciseId);
@@ -783,6 +1313,16 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
             error !== null &&
             (error as { code?: string }).code === "P2002"
           ) {
+            // Lost idempotency race: another submission wrote the same key.
+            if (input.clientRequestId) {
+              const existing = await tx.exerciseSet.findFirst({
+                where: {
+                  workoutExerciseId: input.workoutExerciseId,
+                  clientRequestId: input.clientRequestId,
+                },
+              });
+              if (existing) return setRowToRecord(existing, group.exerciseId);
+            }
             throw new ConflictError(`position ${position} already used for this exercise`, {
               cause: error,
             });

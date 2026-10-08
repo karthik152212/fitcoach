@@ -262,9 +262,9 @@ export const PUSH_EXERCISES: readonly KnowledgeExercise[] = [
     primaryMovementFunction: "horizontal_press",
     movementFunctions: ["horizontal_press", "elbow_extension", "anti_extension"],
     roles: ["compound_movement", "horizontal_push", "accessory_movement"],
-    equipment: ["bodyweight"],
+    equipment: [],
     stabilityDemand: "high",
-    loadingCharacteristic: "bodyweight_external_load",
+    loadingCharacteristic: "bodyweight_only",
     rangeOfMotionCharacteristic: "full_stretch_to_squeeze",
     summary: "The default bodyweight horizontal press; trains the press pattern and anti-extension at once.",
     relations: [

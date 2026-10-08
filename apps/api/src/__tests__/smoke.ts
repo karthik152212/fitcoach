@@ -34,6 +34,9 @@ let server: ReturnType<typeof createServer> | undefined;
 let base = "";
 let userId = "";
 let exerciseId = "";
+let catalogEquipmentIds: string[] = [];
+let catalogEquipmentBySlug: Record<string, string> = {};
+let requiredEquipmentByExerciseId = new Map<string, readonly string[]>();
 
 async function request(method: string, path: string, body?: unknown): Promise<HttpResult> {
   const response = await fetch(`${base}${path}`, {
@@ -68,6 +71,14 @@ before(
     const exercise = (await repositories.exercises.listExercises())[0];
     assert.ok(exercise, "seed must provide an exercise");
     exerciseId = exercise.id;
+    const catalog = await repositories.equipment.listCatalog();
+    catalogEquipmentIds = catalog.map((item) => item.id);
+    catalogEquipmentBySlug = Object.fromEntries(catalog.map((item) => [item.slug, item.id]));
+    assert.ok(catalogEquipmentIds.length >= 4, "seed must provide the equipment a real plan needs");
+    const knowledge = await repositories.exercises.listExerciseKnowledge();
+    requiredEquipmentByExerciseId = new Map(
+      knowledge.map((item) => [item.id, item.requiredEquipmentIds] as const),
+    );
   },
   { timeout: 600_000 },
 );
@@ -437,4 +448,325 @@ test("coaching loop: diagnosis, recommendation, no_change intervention outcome",
 
   const diagnoses = await get(`/v0/users/${userId}/diagnoses`);
   assert.equal((diagnoses.data["diagnoses"] as unknown[]).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: adaptive training engine
+// ---------------------------------------------------------------------------
+
+test("phase 3 planner: generate, inspect, adapt and compare a plan", async () => {
+  // The same user as the earlier journeys, now with real equipment. `validFrom`
+  // is pinned: it defaults to "today", and a plan generated for an earlier date
+  // must not be evaluated against equipment the user did not yet have. The date
+  // is chosen so the later "no equipment before this" scenario still holds.
+  for (const equipmentId of catalogEquipmentIds.slice(0, 4)) {
+    const added = await post(`/v0/users/${userId}/equipment`, {
+      equipmentId,
+      validFrom: "2026-09-01",
+    });
+    assert.equal(added.status, 201, added.raw);
+  }
+
+  const generated = await post(`/v0/users/${userId}/training-plans/generate`, {
+    asOf: "2026-10-06",
+    goalKind: "bodybuilding",
+    availableTrainingDays: 4,
+    maxSessionDurationMinutes: 60,
+    experience: "intermediate",
+  });
+  assert.equal(generated.status, 201, generated.raw);
+  const planId = generated.data["plan"]["id"] as string;
+  const version = generated.data["version"] as {
+    id: string;
+    versionNumber: number;
+    configVersion: string;
+  };
+  assert.equal(version.versionNumber, 1);
+  assert.equal(version.configVersion, "fitcoach.training.v1");
+  const plannedSessions = generated.data["sessions"] as Array<{
+    name: string;
+    exercises: unknown[];
+  }>;
+  assert.equal(plannedSessions.length, 4);
+  for (const session of plannedSessions) {
+    assert.ok(
+      session.exercises.length > 0,
+      `session "${session.name}" must be planned with exercises (warnings: ${JSON.stringify(
+        generated.data["warnings"],
+      )})`,
+    );
+  }
+  assert.ok((generated.data["quality"]["totalScore"] as number) > 0);
+
+  const state = await get(`/v0/users/${userId}/training-state`);
+  assert.equal(state.status, 200, state.raw);
+  assert.equal(state.data["trainingState"]["currentPlanVersionId"], version.id);
+  assert.ok(
+    Object.keys(state.data["trainingState"]["plannedWeeklyVolumePerMuscle"] as object).length > 0,
+    `the training state must report prescribed sets per muscle: ${JSON.stringify({
+      planned: state.data["trainingState"]["plannedWeeklyVolumePerMuscle"],
+      effective: Object.keys(
+        state.data["trainingState"]["effectiveWeeklyVolumePerMuscle"] as object,
+      ).length,
+      distribution: (state.data["trainingState"]["exerciseDistribution"] as unknown[]).length,
+      slots: (generated.data["version"] as { sessions: Array<{ slots: unknown[] }> }).sessions.map(
+        (session) => session.slots.length,
+      ),
+    })}`,
+  );
+
+  const constraints = await get(`/v0/users/${userId}/training-plans/${planId}/constraints`);
+  assert.equal(constraints.status, 200, constraints.raw);
+  assert.ok((constraints.data["constraints"] as unknown[]).length > 0);
+
+  const coverage = await get(`/v0/users/${userId}/training-plans/${planId}/coverage`);
+  assert.equal(coverage.status, 200, coverage.raw);
+  assert.ok(((coverage.data["volume"] as any)["byMuscle"] as unknown[]).length > 0);
+
+  const progression = await get(`/v0/users/${userId}/training-plans/${planId}/progression`);
+  assert.equal(progression.status, 200, progression.raw);
+  assert.ok((progression.data["rules"] as unknown[]).length > 0);
+
+  const adapt = await post(`/v0/users/${userId}/training-plans/${planId}/adapt`, {});
+  assert.equal(adapt.status, 200, adapt.raw);
+  assert.ok(typeof adapt.data["outcome"] === "string");
+  assert.ok(adapt.data["decision"]["id"], "every adaptation writes a decision row");
+
+  const decisions = await get(`/v0/users/${userId}/training-plans/${planId}/decisions`);
+  assert.equal(decisions.status, 200, decisions.raw);
+  assert.ok((decisions.data["decisions"] as unknown[]).length >= 1);
+
+  const compare = await get(`/v0/users/${userId}/training-plans/${planId}/compare?from=1&to=1`);
+  assert.equal(compare.status, 200, compare.raw);
+  assert.ok(
+    Array.isArray((compare.data["comparison"] as any)["muscleVolumeChanges"]),
+    "comparison must expose per-muscle volume changes",
+  );
+
+  const versionRead = await get(
+    `/v0/users/${userId}/training-plans/${planId}/versions/${version.versionNumber}`,
+  );
+  assert.equal(versionRead.status, 200, versionRead.raw);
+  assert.equal(versionRead.data["version"]["id"], version.id);
+
+  // Phase 3.1.1: a user with NO recorded equipment no longer gets an empty
+  // refusal — the expanded equipment-free catalogue staffs a real
+  // bodyweight-only plan instead.
+  const noEquipmentUser = await post("/v0/users", {
+    email: `smoke-noeq-${newUuidv7()}@example.com`,
+    displayName: "No Equipment Tester",
+    timezone: "Asia/Kolkata",
+  });
+  assert.equal(noEquipmentUser.status, 201, noEquipmentUser.raw);
+  const noEquipmentUserId = noEquipmentUser.data["user"]["id"] as string;
+  const bodyweightOnly = await post(`/v0/users/${noEquipmentUserId}/training-plans/generate`, {
+    asOf: "2026-01-05",
+    goalKind: "bodybuilding",
+    availableTrainingDays: 4,
+    maxSessionDurationMinutes: 60,
+    experience: "intermediate",
+  });
+  assert.equal(bodyweightOnly.status, 201, bodyweightOnly.raw);
+  const noEquipmentSessions = bodyweightOnly.data["sessions"] as Array<{
+    exercises: Array<{ exerciseId: string }>;
+  }>;
+  for (const session of noEquipmentSessions) {
+    assert.ok(session.exercises.length > 0, "a bodyweight-only session must never be empty");
+    for (const exercise of session.exercises) {
+      assert.deepEqual(
+        [...(requiredEquipmentByExerciseId.get(exercise.exerciseId) ?? ["missing"])],
+        [],
+        "every exercise in a no-equipment-recorded plan must require nothing",
+      );
+    }
+  }
+
+  // A genuinely unsatisfiable request is still answered with explicit reasons
+  // instead of a plan full of empty sessions.
+  const infeasible = await post(`/v0/users/${userId}/training-plans/generate`, {
+    asOf: "2026-01-05",
+    goalKind: "bodybuilding",
+    availableTrainingDays: 0,
+    maxSessionDurationMinutes: 60,
+    experience: "intermediate",
+  });
+  assert.equal(infeasible.status, 200, infeasible.raw);
+  assert.equal(infeasible.data["feasibility"], "infeasible");
+  assert.ok((infeasible.data["infeasibilityReasons"] as string[]).length > 0);
+  assert.equal(infeasible.data["plan"], undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3.1: performance ledger + training-environment continuity
+// ---------------------------------------------------------------------------
+
+test("phase 3.1 continuity: a temporary plan adapts a week away and the gym plan survives", async () => {
+  const createdUser = await post("/v0/users", {
+    email: `smoke31-${newUuidv7()}@example.com`,
+    displayName: "Continuity Tester",
+    timezone: "Asia/Kolkata",
+  });
+  assert.equal(createdUser.status, 201, createdUser.raw);
+  const uid = createdUser.data["user"]["id"] as string;
+
+  const goal = await post(`/v0/users/${uid}/goals`, {
+    kind: "lean_recomposition",
+    description: "Build muscle while staying lean",
+    effectiveFrom: "2026-01-01",
+  });
+  assert.equal(goal.status, 201, goal.raw);
+  for (const equipmentId of catalogEquipmentIds) {
+    const added = await post(`/v0/users/${uid}/equipment`, {
+      equipmentId,
+      validFrom: "2026-01-01",
+    });
+    assert.ok(added.status === 201 || added.status === 200, added.raw);
+  }
+
+  // 1. A normal gym plan exists.
+  const gym = await post(`/v0/users/${uid}/training-plans/generate`, {
+    asOf: "2026-10-06",
+    goalKind: "bodybuilding",
+    availableTrainingDays: 4,
+    maxSessionDurationMinutes: 60,
+    experience: "intermediate",
+  });
+  assert.equal(gym.status, 201, gym.raw);
+  const gymPlanId = gym.data["plan"]["id"] as string;
+  const gymVersionId = gym.data["version"]["id"] as string;
+
+  // 2. For a week the user trains somewhere with less equipment — declared,
+  //    never guessed. One redundant machine is withheld, so the plan must be
+  //    adapted and the withheld equipment stated explicitly.
+  const withheldEquipmentId = catalogEquipmentBySlug["cable_machine"] ?? catalogEquipmentIds[0]!;
+  const environment = await post(`/v0/users/${uid}/training-environments`, {
+    kind: "custom",
+    effectiveFrom: "2026-10-20",
+    reason: "training in a garage without the cable machine",
+    isTemporary: true,
+    unavailableEquipmentIds: [withheldEquipmentId],
+  });
+  assert.equal(environment.status, 201, environment.raw);
+
+  const activeEnvironment = await get(
+    `/v0/users/${uid}/training-environments/active?asOf=2026-10-21`,
+  );
+  assert.equal(activeEnvironment.status, 200, activeEnvironment.raw);
+  assert.equal(activeEnvironment.data["environment"]["kind"], "custom");
+  assert.equal(activeEnvironment.data["environment"]["constrained"], true);
+  const environmentLimitations = activeEnvironment.data["environment"]["limitations"] as Array<{
+    kind: string;
+    subject: string;
+  }>;
+  assert.ok(
+    environmentLimitations.length > 0,
+    "a constrained environment must state what it withholds",
+  );
+  assert.ok(
+    environmentLimitations.some(
+      (limitation) =>
+        limitation.kind === "equipment" && limitation.subject === withheldEquipmentId,
+    ),
+    "the withheld equipment is named, not silently dropped",
+  );
+
+  // 3. A temporary plan is adapted from the gym plan.
+  const temporary = await post(`/v0/users/${uid}/training-plans/generate-temporary`, {
+    asOf: "2026-10-21",
+    availableTrainingDays: 4,
+    maxSessionDurationMinutes: 60,
+    experience: "intermediate",
+  });
+  assert.equal(temporary.status, 201, temporary.raw);
+  assert.equal(temporary.data["needed"], true, temporary.raw);
+  assert.equal(temporary.data["sourceVersionId"], gymVersionId);
+  assert.equal(temporary.data["result"]["plan"]["kind"], "temporary_environment");
+  assert.equal(temporary.data["result"]["plan"]["environmentKind"], "custom");
+  const temporarySessions = temporary.data["result"]["sessions"] as Array<{
+    estimatedMinutes: number;
+    exercises: Array<{ exerciseId: string }>;
+  }>;
+  assert.ok(temporarySessions.length > 0);
+  for (const session of temporarySessions) {
+    assert.ok(session.exercises.length > 0, "a temporary session must never be empty");
+    assert.ok(session.estimatedMinutes <= 60, "a temporary session must respect the budget");
+  }
+
+  // 4. The gym plan is untouched and stays the active plan.
+  const activePlan = await get(`/v0/users/${uid}/training-plans/active`);
+  assert.equal(activePlan.status, 200, activePlan.raw);
+  assert.equal(activePlan.data["plan"]["id"], gymPlanId);
+  assert.equal(activePlan.data["plan"]["versions"].length, 1);
+
+  // 5. An adapted home session is logged (bodyweight, not "missing load").
+  const firstSession = temporarySessions[0]!;
+  const exerciseId = firstSession.exercises[0]!.exerciseId;
+  const temporaryPlanId = temporary.data["result"]["plan"]["id"] as string;
+  const workout = await post(`/v0/users/${uid}/workouts`, {
+    planId: temporaryPlanId,
+    startedAt: "2026-10-21T18:00:00.000Z",
+    status: "in_progress",
+    clientRequestId: newUuidv7(),
+    environmentKind: "custom",
+    sessionClassification: "adapted",
+  });
+  assert.equal(workout.status, 201, workout.raw);
+  const workoutId = workout.data["workout"]["id"] as string;
+  const group = await post(`/v0/users/${uid}/workouts/${workoutId}/exercises`, { exerciseId });
+  assert.equal(group.status, 201, group.raw);
+  const workoutExerciseId = group.data["workoutExercise"]["id"] as string;
+  const set = await post(`/v0/users/${uid}/workouts/${workoutId}/sets`, {
+    workoutExerciseId,
+    kind: "working",
+    loadKind: "bodyweight",
+    reps: 15,
+    rir: 2,
+    clientRequestId: newUuidv7(),
+  });
+  assert.equal(set.status, 201, set.raw);
+  const completed = await post(`/v0/users/${uid}/workouts/${workoutId}/complete`, {
+    status: "completed",
+    endedAt: "2026-10-21T18:45:00.000Z",
+  });
+  assert.equal(completed.status, 200, completed.raw);
+
+  // 6. Progression is evaluated from the performed evidence and ledgered.
+  const evaluation = await post(`/v0/users/${uid}/progression/evaluate`, {
+    exerciseId,
+    asOf: "2026-10-21",
+  });
+  assert.equal(evaluation.status, 200, evaluation.raw);
+  assert.equal(typeof evaluation.data["persisted"], "boolean");
+
+  const ledger = await get(`/v0/users/${uid}/progression/ledger`);
+  assert.equal(ledger.status, 200, ledger.raw);
+  assert.ok(Array.isArray(ledger.data["entries"]));
+  assert.equal(typeof ledger.data["totalCompletedProgressions"], "number");
+
+  const history = await get(`/v0/users/${uid}/performance-history?exerciseId=${exerciseId}`);
+  assert.equal(history.status, 200, history.raw);
+  assert.ok((history.data["observations"] as unknown[]).length >= 1);
+
+  // 7. The adapted week is visible in continuity as training, not as a gap.
+  const continuity = await get(`/v0/users/${uid}/training-continuity?asOf=2026-10-21`);
+  assert.equal(continuity.status, 200, continuity.raw);
+  assert.equal(continuity.data["sessions"]["adapted"], 1, "an adapted session counts as training");
+  assert.equal(continuity.data["sessions"]["home"], 1);
+  assert.equal(continuity.data["sessions"]["completed"], 1);
+  assert.equal(continuity.data["temporaryPlans"].length, 1);
+
+  // 8. Gym access returns → the temporary plan is retired, not edited.
+  const restored = await post(`/v0/users/${uid}/training-environments/restore`, {
+    asOf: "2026-10-28",
+  });
+  assert.equal(restored.status, 200, restored.raw);
+  assert.equal(restored.data["restored"], true);
+  assert.equal(restored.data["environment"]["kind"], "gym");
+  assert.equal((restored.data["retiredPlanIds"] as string[]).length, 1);
+
+  const after = await get(`/v0/users/${uid}/training-continuity?asOf=2026-10-29`);
+  assert.equal(after.data["sessions"]["adapted"], 1, "home training history is never erased");
+  assert.equal(after.data["temporaryPlans"][0]["status"], "retired");
+  const planAfter = await get(`/v0/users/${uid}/training-plans/active`);
+  assert.equal(planAfter.data["plan"]["id"], gymPlanId);
 });

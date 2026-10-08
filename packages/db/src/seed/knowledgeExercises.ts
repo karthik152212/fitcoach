@@ -1,6 +1,7 @@
 import type { FormOverlayKind } from "@fitcoach/domain";
 import type { KnowledgeMediaFixture } from "./knowledgeTypes";
 import { ARM_EXERCISES } from "./knowledgeExercisesArms";
+import { BODYWEIGHT_EXERCISES } from "./knowledgeExercisesBodyweight";
 import { LEG_AND_CORE_EXERCISES } from "./knowledgeExercisesLegsCore";
 import { PULL_EXERCISES } from "./knowledgeExercisesPull";
 import { PUSH_EXERCISES } from "./knowledgeExercisesPush";
@@ -25,6 +26,7 @@ export const KNOWLEDGE_EXERCISES: readonly KnowledgeExercise[] = [
   ...PULL_EXERCISES,
   ...ARM_EXERCISES,
   ...LEG_AND_CORE_EXERCISES,
+  ...BODYWEIGHT_EXERCISES,
 ];
 
 export interface KnowledgeSubstitution {
@@ -158,6 +160,82 @@ export const KNOWLEDGE_SUBSTITUTIONS: readonly KnowledgeSubstitution[] = [
     trigger: "equipment_missing",
     reason: "Machine vertical pull onto the same lats when no pull-up bar is available.",
     rankHint: 1,
+  },
+  // Phase 3.1.1 — equipment-free fallbacks. The two "back" edges are
+  // deliberately ranked low and worded as partial: no floor movement
+  // reproduces loaded pulling.
+  {
+    exercise: "barbell_back_squat",
+    substitute: "bodyweight_squat",
+    trigger: "equipment_missing",
+    reason:
+      "Same squat pattern and quadriceps/glute targets with bodyweight loading; the movement is preserved, the external load is not.",
+    rankHint: 1,
+  },
+  {
+    exercise: "leg_press",
+    substitute: "bodyweight_squat",
+    trigger: "equipment_missing",
+    reason: "Knee-extension work for the quadriceps without a machine; the load stimulus is reduced, which the ranking reflects.",
+    rankHint: 0,
+  },
+  {
+    exercise: "hip_thrust",
+    substitute: "glute_bridge",
+    trigger: "equipment_missing",
+    reason: "Same hip-extension pattern and gluteus maximus target performed on the floor; loses external load and some range.",
+    rankHint: 2,
+  },
+  {
+    exercise: "lying_leg_curl",
+    substitute: "hamstring_bridge",
+    trigger: "equipment_missing",
+    reason:
+      "Hamstrings contribute through hip extension at a long lever rather than through knee flexion — a partial substitute, never claimed equal to a leg curl.",
+    rankHint: 0,
+  },
+  {
+    exercise: "romanian_deadlift",
+    substitute: "single_leg_bodyweight_rdl",
+    trigger: "equipment_missing",
+    reason: "Keeps the hinge pattern and a lengthened hamstring position per leg, without the external load.",
+    rankHint: 1,
+  },
+  {
+    exercise: "barbell_bench_press",
+    substitute: "push_up",
+    trigger: "equipment_missing",
+    reason: "Same horizontal-press pattern and sternal-pectoralis target with bodyweight loading.",
+    rankHint: 1,
+  },
+  {
+    exercise: "barbell_overhead_press",
+    substitute: "pike_push_up",
+    trigger: "equipment_missing",
+    reason: "Shoulder-focused pressing from a pike position; keeps the front-deltoid and triceps demand without a bar.",
+    rankHint: 1,
+  },
+  {
+    exercise: "seated_calf_raise",
+    substitute: "bent_knee_calf_raise",
+    trigger: "equipment_missing",
+    reason: "Same bent-knee plantarflexion bias for the soleus, performed standing without a machine.",
+    rankHint: 2,
+  },
+  {
+    exercise: "lat_pulldown_wide_grip",
+    substitute: "prone_y_raise",
+    trigger: "equipment_missing",
+    reason:
+      "Honest partial: scapular and lower-trap stimulus only — a floor movement cannot reproduce loaded vertical pulling for the lats.",
+    rankHint: 0,
+  },
+  {
+    exercise: "seated_cable_row",
+    substitute: "reverse_snow_angel",
+    trigger: "equipment_missing",
+    reason: "Honest partial: rear-deltoid and scapular-retraction stimulus without the loaded row.",
+    rankHint: 0,
   },
 ];
 

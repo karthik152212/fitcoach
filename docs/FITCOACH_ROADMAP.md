@@ -1,6 +1,6 @@
 # FitCoach Delivery Roadmap
 
-Revision: 2026-10-05. Supersedes the "MVP / Phase 1–3" list in
+Revision: 2026-10-07. Supersedes the "MVP / Phase 1–3" list in
 `docs/PRODUCT_SPEC.md` v0.1 and the roadmap that lived there.
 
 Scope rules that apply to every phase:
@@ -22,7 +22,9 @@ Scope rules that apply to every phase:
 |---|---|---|
 | 1 | Backend foundation — **COMPLETE** | — |
 | 2 | Exercise + muscle + equipment intelligence | 1 |
-| 3 | Adaptive training engine | 2 |
+| 3 | Adaptive training engine — **IMPLEMENTED** | 2 |
+| 3.1 | Performance/progression ledger + training continuity — **IMPLEMENTED** | 3 |
+| 3.1.1 | Equipment-free exercise knowledge + home training completeness — **IMPLEMENTED** | 3.1 |
 | 4 | Nutrition + food intelligence | 1 |
 | 5 | Activity, steps + recovery architecture/integrations | 1 |
 | 6 | Body measurement + physique modeling | 1 |
@@ -74,6 +76,74 @@ Goal: plans that respond to the individual and to their history.
 
 Exit criteria: deterministic plan generation + progression implemented and
 tested; `Workout` ↔ `plan_version` linkage resolved (domain divergence D2/D3).
+
+Delivered (working tree, not yet committed): deterministic split generation,
+volume/frequency targets as ranges, the effective-set volume model, session
+duration budgeting with repair, Phase 2-driven exercise selection, goal
+alignment, plan quality and explicit constraint evaluation, progression rules,
+plateau signals, the ordered adaptation ladder with first-class `no_change` and
+bounded smallest-useful-change volume adjustments, plan version lifecycle
+(supersession, generation reasons, config version), plan comparison and
+structured decisions, migration `0003_phase3_adaptive_training`, the
+`/v0/users/:userId/training-plans/*` + `training-state` routes, and the Phase 3
+test suites. Model reference and known limits:
+`docs/FITCOACH_PHASE3_TRAINING_ENGINE.md`.
+
+## PHASE 3.1 — Performance ledger and training continuity
+
+Goal: make progression a *recorded fact* and let training survive a change of
+environment without losing anything.
+
+- per-slot/per-exercise performance + progression ledger, distinguishing what
+  was **recommended**, what the user **accepted**, and what was **actually
+  performed** — `progressionsCompleted` becomes a real count, including
+  bodyweight progression (reps, effort, variation, range of motion, tempo)
+- first-class training environments (gym / home / home-without-equipment /
+  limited-equipment / hotel / travel / outdoor / custom), interval-versioned
+- a **temporary, environment-adapted** plan that preserves the original gym plan
+  and is explicitly bounded
+- exercise substitution that never claims equivalence without load, and states
+  the stimulus an environment cannot reproduce (honesty about pulling/back work)
+- adapted-vs-missed sessions, and an explicit return-to-gym restoration
+- DB structures (migration `0004_phase31_progression_ledger_and_environments`),
+  API contracts and the three end-to-end journeys
+
+Delivered (working tree, not yet committed): `performanceLedger.ts` +
+`trainingEnvironment.ts` engines with `fitcoach.progression.v1` /
+`fitcoach.environment.v1` config, the `training_environment_periods` /
+`progression_evaluations` / `progression_decision_events` tables, the
+`TrainingContinuityService` and temporary-plan generation, plan-comparison +
+ExerciseDecision extensions, and the Phase 3.1 test suites. Model reference:
+`docs/FITCOACH_PHASE3_TRAINING_ENGINE.md` §30–44.
+
+Known limit (stated, not hidden): the seed catalog is gym-oriented and has
+almost no equipment-free lower-body movements, so a fully equipment-free week
+can only be partly staffed from it; the engine substitutes where it can and
+reports the gap otherwise. No UI in this phase. *(Resolved in Phase 3.1.1.)*
+
+## PHASE 3.1.1 — Equipment-free exercise knowledge expansion
+
+Goal: a user who temporarily has NO equipment still gets the best feasible,
+scientifically honest training plan the knowledge layer can support.
+
+- 28 new canonical equipment-free exercises (`equipment: []`) covering
+  squat/lunge families, glute bridges, honest posterior-chain work, calves,
+  the push-up and pike families, core (anti-extension, trunk flexion, lateral
+  stability) and scapular/postural work; `push_up`, `plank`, `dead_bug` and
+  `standing_calf_raise` corrected to require nothing
+- progression families via shared `variationKey` prefixes; bodyweight
+  progression stays `reps → rir → variation → rom → tempo → sets`
+- pulling honesty: no floor movement claims a pull; dropped lat/row slots are
+  reported as lost coverage with named limitations, never faked
+- planner bridge from group-level tracked slugs (`calves`, `abdominals`, …)
+  to the catalog's muscle-level slugs, so calf/core/deltoid slots are
+  fillable against the real catalog at all
+- full no-equipment-week acceptance journey against the real seed: temporary
+  plan staffed and budgeted, `feasible_with_tradeoffs`, bodyweight set in the
+  progression ledger, gym plan untouched after restore
+- no schema/migration change; no UI; no nutrition
+
+Model reference: `docs/FITCOACH_PHASE3_TRAINING_ENGINE.md` §45.
 
 ## PHASE 4 — Nutrition and food intelligence
 

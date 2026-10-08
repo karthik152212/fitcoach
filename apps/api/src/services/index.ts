@@ -1,9 +1,11 @@
 import type { Repositories } from "@fitcoach/db";
 import { ActivityService, BodyMeasurementService } from "./body";
 import { CoachingService } from "./coaching";
+import { TrainingContinuityService } from "./continuity";
 import { EquipmentService, GoalService, ProfileService, UserService } from "./identity";
 import { KnowledgeService } from "./knowledge";
 import { NutritionService } from "./nutrition";
+import { TrainingPlannerService } from "./planner";
 import { TrainingService } from "./training";
 
 /**
@@ -22,6 +24,8 @@ export interface AppServices {
   bodyMeasurements: BodyMeasurementService;
   activity: ActivityService;
   training: TrainingService;
+  planner: TrainingPlannerService;
+  continuity: TrainingContinuityService;
   knowledge: KnowledgeService;
   nutrition: NutritionService;
   coaching: CoachingService;
@@ -36,6 +40,8 @@ export function createServices(repos: Repositories): AppServices {
     bodyMeasurements: new BodyMeasurementService(repos.bodyMeasurements, repos.users),
     activity: new ActivityService(repos.activity, repos.users),
     training: new TrainingService(repos),
+    planner: new TrainingPlannerService(repos),
+    continuity: new TrainingContinuityService(repos),
     knowledge: new KnowledgeService(repos),
     nutrition: new NutritionService(repos),
     coaching: new CoachingService(repos),
@@ -47,4 +53,6 @@ export { CoachingService } from "./coaching";
 export { EquipmentService, GoalService, ProfileService, UserService } from "./identity";
 export { NutritionService } from "./nutrition";
 export { TrainingService } from "./training";
+export { TrainingPlannerService } from "./planner";
+export { TrainingContinuityService } from "./continuity";
 export { KnowledgeService } from "./knowledge";

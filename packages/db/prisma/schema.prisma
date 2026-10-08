@@ -65,6 +65,8 @@ model User {
   diagnoses           Diagnosis[]
   recommendations     Recommendation[]
   interventions       Intervention[]
+  trainingEnvironments TrainingEnvironmentPeriod[]
+  progressionEvaluations ProgressionEvaluation[]
 
   // UNIQUE (external_auth_id) partial — @unique above.
   // UNIQUE (lower(email)) WHERE email IS NOT NULL — partial expression, in migration SQL.
@@ -405,6 +407,7 @@ model Exercise {
   userPreferences    UserExercisePreference[]
   planSlots          TrainingPlanExerciseSlot[]
   workoutExercises   WorkoutExercise[]
+  progressionEvaluations ProgressionEvaluation[] @relation("ProgressionEvaluationExercise")
 
   // UNIQUE (external_source_id, external_id) — NULLs are distinct in PG, so
   // this equals the design's partial unique WHERE external_id IS NOT NULL.
@@ -723,14 +726,28 @@ model TrainingPlan {
   status String  @db.Text
   notes  String? @db.Text
 
+  // Phase 3.1 — a temporary environment-adapted plan never replaces the gym
+  // plan. It is its own plan, marked `temporary_environment`, linked back to
+  // the version it was derived from, and dated to expire.
+  /// CHECK in ('primary','temporary_environment').
+  kind           String    @default("primary") @db.Text
+  /// CHECK in TrainingEnvironmentKind values, or NULL (= gym default).
+  environmentKind String?  @map("environment_kind") @db.Text
+  /// User-local last day the temporary plan applies (inclusive).
+  effectiveUntil DateTime? @map("effective_until") @db.Date
+  /// Plan version whose content the temporary plan was adapted from.
+  temporaryForVersionId String? @map("temporary_for_version_id") @db.Uuid
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   versions TrainingPlanVersion[]
   workouts Workout[]
+  temporaryForVersion TrainingPlanVersion? @relation("TemporaryPlanOrigin", fields: [temporaryForVersionId], references: [id], onDelete: SetNull)
 
   @@index([userId])
+  @@index([userId, kind])
   @@map("training_plans")
 }
 
@@ -747,16 +764,92 @@ model TrainingPlanVersion {
   /// Why the plan changed — explainability.
   rationaleNotes String?   @map("rationale_notes") @db.Text
 
+  // Phase 3 — adaptive training engine versioning metadata. Content columns
+  // stay frozen; only the lifecycle pair below may ever be updated (trigger
+  // `training_plan_versions_lifecycle_only`).
+  /// CHECK in ('active','superseded','retired').
+  lifecycleStatus String    @default("active") @map("lifecycle_status") @db.Text
+  /// CHECK in ('initial_plan','plan_adjustment','exercise_substitution','volume_adjustment',
+  /// 'frequency_adjustment','split_adjustment','progression_adjustment','no_change').
+  generationReason String?  @map("generation_reason") @db.Text
+  /// Previous version this one supersedes; CHECK parent_version_id <> id.
+  parentVersionId String?   @map("parent_version_id") @db.Uuid
+  /// When this version stopped being the active one (lifecycle column).
+  supersededAt    DateTime? @map("superseded_at") @db.Timestamptz(6)
+  /// Training configuration version used to generate this version.
+  configVersion   String?   @map("config_version") @db.Text
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  plan          TrainingPlan          @relation(fields: [planId], references: [id], onDelete: Cascade)
+  plan          TrainingPlan           @relation(fields: [planId], references: [id], onDelete: Cascade)
+  parentVersion TrainingPlanVersion?   @relation("PlanVersionLineage", fields: [parentVersionId], references: [id], onDelete: SetNull)
+  childVersions TrainingPlanVersion[]  @relation("PlanVersionLineage")
   sessions      TrainingPlanSession[]
   workouts      Workout[]
+  decisions     TrainingPlanDecision[]
+  constraints   TrainingPlanConstraint[]
+  temporaryPlans TrainingPlan[]        @relation("TemporaryPlanOrigin")
   diagnoses     Diagnosis[]           @relation("DiagnosisActivePlanVersion")
-  interventions Intervention[]        @relation("InterventionActivePlanVersion")
+  interventions Intervention[]       @relation("InterventionActivePlanVersion")
 
   @@unique([planId, versionNumber])
+  @@index([planId, lifecycleStatus])
   @@map("training_plan_versions")
+}
+
+/// Why a plan version exists — the structured, reproducible decision behind a
+/// version (Phase 3 §23). Append-only: a new decision is a new row.
+model TrainingPlanDecision {
+  id        String  @id @db.Uuid
+  versionId String  @map("version_id") @db.Uuid
+  /// CHECK in PlanChangeKind values (domain `PlanChangeKind`).
+  decision  String  @db.Text
+  /// Structured explanation codes (domain `PlanReasonCode`).
+  reasonCodes String[] @default([]) @map("reason_codes") @db.Text
+  /// Evidence that triggered the decision.
+  evidence  String  @db.Text
+  satisfiedConstraints String[] @default([]) @map("satisfied_constraints") @db.Text
+  /// Empty for a feasible plan; anything here is an explicit tradeoff.
+  violatedConstraints String[] @default([]) @map("violated_constraints") @db.Text
+  affectedMuscles String[] @default([]) @map("affected_muscles") @db.Text
+  /// Pragmatic uuid[] array (documented tradeoff D5 — ids are not FK-checked).
+  affectedExercises String[] @default([]) @map("affected_exercises") @db.Uuid
+  /// Frozen before/after plan summaries (PlanSummary JSON).
+  beforeSnapshot Json?  @map("before_snapshot")
+  afterSnapshot  Json?  @map("after_snapshot")
+  /// numeric(4,3) CHECK BETWEEN 0 AND 1.
+  confidence     Decimal? @db.Decimal(4, 3)
+  assumptions    String[] @default([]) @db.Text
+  configVersion  String?  @map("config_version") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  version TrainingPlanVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([versionId])
+  @@map("training_plan_decisions")
+}
+
+/// Constraint evaluation attached to a plan version (Phase 3 §15): every
+/// constraint reports satisfied / violated / warning explicitly.
+model TrainingPlanConstraint {
+  id        String @id @db.Uuid
+  versionId String @map("version_id") @db.Uuid
+  /// Stable key within the plan, e.g. `days_per_week`.
+  constraintKey String @map("constraint_key") @db.Text
+  kind      String @db.Text
+  label     String @db.Text
+  isHard    Boolean @default(true) @map("is_hard")
+  /// CHECK in ('satisfied','violated','warning').
+  result    String @db.Text
+  violationDetail String? @map("violation_detail") @db.Text
+  warningDetail   String? @map("warning_detail") @db.Text
+
+  version TrainingPlanVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, constraintKey])
+  @@index([versionId])
+  @@map("training_plan_constraints")
 }
 
 /// Session template within a plan version (§4.5).
@@ -799,6 +892,8 @@ model TrainingPlanExerciseSlot {
   /// (documented divergence D8).
   substitutionExerciseIds String[] @default([]) @map("substitution_exercise_ids") @db.Uuid
   notes                   String?  @db.Text
+  progressionRule         TrainingPlanProgressionRule?
+  workoutExercises        WorkoutExercise[]  @relation("WorkoutExerciseSlot")
 
   session  TrainingPlanSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   exercise Exercise            @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
@@ -806,6 +901,130 @@ model TrainingPlanExerciseSlot {
   @@unique([sessionId, position])
   @@index([exerciseId])
   @@map("training_plan_exercise_slots")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.1 — training environments and the progression ledger
+// ---------------------------------------------------------------------------
+
+/// An interval during which the user's training environment is not the default
+/// gym (a trip, a hotel, a week at home). Mirrors user_equipment: closing a row
+/// and opening a new one is the only way to change the environment, so what the
+/// user could do on a past day stays answerable. The goal is NEVER changed by
+/// this row — only the available exercise universe and plan constraints are.
+model TrainingEnvironmentPeriod {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  /// CHECK in TrainingEnvironmentKind values.
+  kind   String @db.Text
+  /// Explicit equipment ids available in this environment. When empty, the
+  /// environment's default allowance is intersected with owned equipment.
+  availableEquipmentIds   String[] @default([]) @map("available_equipment_ids") @db.Uuid
+  unavailableEquipmentIds String[] @default([]) @map("unavailable_equipment_ids") @db.Uuid
+  /// User-local validity interval; CHECK (effective_to IS NULL OR effective_to > effective_from).
+  effectiveFrom DateTime  @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+  reason        String?   @db.Text
+  /// True when the change is expected to end (a trip, not a move).
+  isTemporary   Boolean   @default(true) @map("is_temporary")
+  notes         String?   @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind, effectiveFrom])
+  @@index([userId, effectiveFrom(sort: Desc)])
+  @@map("training_environment_periods")
+}
+
+/// One immutable progression evaluation (Phase 3.1 §9). Append-only: a changed
+/// evaluation is a new row, so a recommendation can never be rewritten after the
+/// fact to look correct.
+model ProgressionEvaluation {
+  id           String @id @db.Uuid
+  userId       String @map("user_id") @db.Uuid
+  exerciseId   String @map("exercise_id") @db.Uuid
+  /// Exercise name at evaluation time (rendering must not need a join).
+  exerciseName String @map("exercise_name") @db.Text
+  planId       String? @map("plan_id") @db.Uuid
+  planVersionId String? @map("plan_version_id") @db.Uuid
+  slotId       String? @map("slot_id") @db.Uuid
+  /// CHECK in TrainingEnvironmentKind values, or NULL.
+  environmentKind String? @map("environment_kind") @db.Text
+  /// CHECK in ProgressionEvaluationOutcome values.
+  outcome      String @db.Text
+  /// The performance the evaluation was made from.
+  currentObservation  Json  @map("current_observation") @db.JsonB
+  previousObservation Json? @map("previous_observation") @db.JsonB
+  /// Deterministic summary the rules consumed.
+  performance  Json @db.JsonB
+  /// The full recommendation (targets, mechanisms, rationale, evidence).
+  recommendation Json @db.JsonB
+  evidence     String[] @default([]) @db.Text
+  /// Deterministic dedupe key: identical inputs produce the same key.
+  fingerprint  String @db.Text
+  configVersion String @map("config_version") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exercise Exercise @relation("ProgressionEvaluationExercise", fields: [exerciseId], references: [id], onDelete: Restrict)
+  events   ProgressionDecisionEvent[]
+
+  @@unique([userId, fingerprint])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([exerciseId])
+  @@map("progression_evaluations")
+}
+
+/// An immutable decision/outcome event for one evaluation. `recommended` is the
+/// opening state written with the evaluation; accepted/rejected/deferred are new
+/// rows, never edits — that is what makes "recommendation vs accepted vs
+/// performed" distinguishable forever.
+model ProgressionDecisionEvent {
+  id           String @id @db.Uuid
+  evaluationId String @map("evaluation_id") @db.Uuid
+  /// CHECK in ('recommended','accepted','rejected','deferred').
+  decision     String @db.Text
+  reason       String? @db.Text
+  /// Idempotency key for the submission that produced this event.
+  idempotencyKey String? @map("idempotency_key") @db.Text
+  /// What actually changed (load/reps/variation) or {"kind":"none"}.
+  actualChange Json? @map("actual_change") @db.JsonB
+  /// Performance observed afterwards, when the client reports it.
+  resultingPerformance Json? @map("resulting_performance") @db.JsonB
+  evidence     String[] @default([]) @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  evaluation ProgressionEvaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+
+  @@unique([evaluationId, idempotencyKey])
+  @@index([evaluationId, createdAt])
+  @@map("progression_decision_events")
+}
+
+/// Deterministic progression rule attached to one planned exercise slot
+/// (Phase 3 §19). Content is frozen with its plan version.
+model TrainingPlanProgressionRule {
+  id     String @id @db.Uuid
+  slotId String @map("slot_id") @db.Uuid
+  /// What starts the rule, e.g. `complete_sessions_at_top_of_rep_range`.
+  trigger String @db.Text
+  condition String @db.Text
+  /// CHECK in domain `ProgressionAction` values.
+  action  String @db.Text
+  bounds  String @db.Text
+  resetBehavior String? @map("reset_behavior") @db.Text
+  rationale String @db.Text
+  configVersion String? @map("config_version") @db.Text
+
+  slot TrainingPlanExerciseSlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+
+  @@unique([slotId])
+  @@map("training_plan_progression_rules")
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +1050,15 @@ model Workout {
   notes           String?   @db.Text
   /// Idempotency key for retries (§15).
   clientRequestId String?   @map("client_request_id") @db.Text
+
+  // Phase 3.1 — the environment the session was actually performed in, and how
+  // it relates to the plan. "Adapted" is completed training in a different
+  // environment; it must never be silently equal to the planned session, and it
+  // must never be recorded as MISSED either.
+  /// CHECK in TrainingEnvironmentKind values, or NULL (unknown / gym default).
+  environmentKind       String? @map("environment_kind") @db.Text
+  /// CHECK in ('planned','adapted','makeup','unplanned'), or NULL.
+  sessionClassification String? @map("session_classification") @db.Text
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -860,15 +1088,29 @@ model WorkoutExercise {
   position   Int
   notes      String? @db.Text
 
+  // Phase 3.1 — link performed work back to the plan slot it fulfilled, and
+  // record that the movement was a substitution (so history never claims the
+  // user performed something they did not).
+  /// Planned slot this group fulfilled; NULL for unplanned training.
+  slotId        String? @map("slot_id") @db.Uuid
+  /// Exercise this one replaced, when performed as a substitution.
+  substitutedFromExerciseId String? @map("substituted_from_exercise_id") @db.Uuid
+  /// CHECK in ('manual','imported','inferred'), or NULL (unknown).
+  performanceSource String? @map("performance_source") @db.Text
+  /// Trainer/athlete note about the substitution itself.
+  substitutionReason String? @map("substitution_reason") @db.Text
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   workout  Workout       @relation(fields: [workoutId], references: [id], onDelete: Cascade)
   exercise Exercise      @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
+  slot     TrainingPlanExerciseSlot? @relation("WorkoutExerciseSlot", fields: [slotId], references: [id], onDelete: SetNull)
   sets     ExerciseSet[]
 
   @@unique([workoutId, position])
   @@index([exerciseId])
+  @@index([slotId])
   @@map("workout_exercises")
 }
 
@@ -897,6 +1139,16 @@ model ExerciseSet {
   rpe               Decimal? @db.Decimal(3, 1)
   notes             String?  @db.Text
 
+  // Phase 3.1 — distinguish bodyweight / weighted-bodyweight / assisted load
+  // instead of forcing every movement into an external-load column, and make a
+  // retried submission idempotent.
+  /// CHECK in PerformanceLoadKind values, or NULL (inferred from columns).
+  loadKind          String?  @map("load_kind") @db.Text
+  /// Assistance that reduced effective load. numeric(7,2) CHECK >= 0.
+  assistanceLoadKg  Decimal? @map("assistance_load_kg") @db.Decimal(7, 2)
+  /// Idempotency key for set-level retries (§32).
+  clientRequestId   String?  @map("client_request_id") @db.Text
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -904,6 +1156,7 @@ model ExerciseSet {
 
   // CHECK that at least one measurable exists:
   // (reps OR distance_meters OR duration_seconds) IS NOT NULL — in SQL.
+  @@unique([workoutExerciseId, clientRequestId])
   @@index([workoutExerciseId, position])
   @@map("exercise_sets")
 }

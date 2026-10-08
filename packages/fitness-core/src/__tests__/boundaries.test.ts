@@ -146,58 +146,101 @@ test("phase 2 promotes the knowledge facades out of stub state", async (t) => {
   });
 });
 
-test("phase 3 planning modules remain explicit stubs", async (t) => {
-  await t.test("volume.computeTrainingVolume throws", () => {
-    assert.throws(() => computeTrainingVolume([]), NotImplementedError);
-  });
-
-  await t.test("progression.recommendProgression throws", () => {
-    assert.throws(
-      () => recommendProgression({ exerciseId: "ex_squat", recentWorkingSets: [] }),
-      NotImplementedError,
+test("phase 3 planning engines are implemented and deterministic", async (t) => {
+  await t.test("volume.computeTrainingVolume is implemented", () => {
+    assert.equal(computeTrainingVolume([]), 0);
+    assert.equal(
+      computeTrainingVolume([
+        { exerciseId: "ex_a", weeklyWorkingSets: 3 },
+        { exerciseId: "ex_b", weeklyWorkingSets: 2 },
+      ]),
+      5,
     );
   });
 
-  await t.test("splitGeneration.generateSplit throws", () => {
-    assert.throws(
-      () =>
-        generateSplit({
-          userId: "usr_test",
-          daysPerWeek: 4,
-          sessionDurationMinutes: 60,
-          experienceLevel: "intermediate",
-          availableEquipmentIds: [],
-        }),
-      NotImplementedError,
+  await t.test("progression.recommendProgression returns a bounded decision", () => {
+    const rested = recommendProgression({ exerciseId: "ex_squat", recentWorkingSets: [] });
+    assert.equal(rested.action, "hold", "no evidence means no progression");
+    assert.ok(rested.reasoning.length > 0);
+
+    const atTopOfRange = recommendProgression({
+      exerciseId: "ex_squat",
+      recentWorkingSets: Array.from({ length: 4 }, () => ({ reps: 15, loadKg: 60, rir: 1 })),
+    });
+    assert.equal(atTopOfRange.action, "progress_reps");
+
+    const review = { exerciseId: "ex_squat", recentWorkingSets: [{ reps: 15, rir: 1 }] };
+    assert.deepEqual(
+      recommendProgression(review),
+      recommendProgression(review),
+      "progression is deterministic",
     );
   });
 
-  await t.test("goalAlignment.evaluateGoalAlignment throws", () => {
-    assert.throws(
-      () =>
-        evaluateGoalAlignment({
-          goal: minimalGoal(),
-          inputs: {
-            recentMeasurements: [],
-            recentWorkouts: [],
-            recentNutrition: [],
-          },
-        }),
-      NotImplementedError,
+  await t.test("splitGeneration.generateSplit is implemented", () => {
+    const request = {
+      userId: "usr_test",
+      daysPerWeek: 4,
+      sessionDurationMinutes: 60,
+      experienceLevel: "intermediate" as const,
+      availableEquipmentIds: [],
+    };
+    const proposal = generateSplit(request);
+    assert.equal(proposal.sessionsPerWeek, 4);
+    assert.equal(proposal.sessionTemplates.length, 4);
+    assert.ok(proposal.rationaleNotes.length > 0);
+    assert.deepEqual(
+      generateSplit(request),
+      proposal,
+      "split generation is deterministic",
     );
   });
 
-  await t.test("trendDetection.detectTrend throws", () => {
-    assert.throws(
-      () =>
-        detectTrend([
-          { date: "2026-08-20", value: 80.2 },
-          { date: "2026-08-21", value: 80.4 },
-        ]),
-      NotImplementedError,
+  await t.test("goalAlignment.evaluateGoalAlignment scores a plan against the goal", () => {
+    const goal = minimalGoal();
+    const goalContext = {
+      goalId: goal.id,
+      goalKind: goal.kind,
+      goalStartDate: goal.effectiveFrom,
+      priorities: goal.priorities,
+      physiquePriorities: goal.priorities,
+    };
+    const exposure = { side_delts: 14, lats: 12, chest: 10 };
+    const roles = { lateral_delt_isolation: 1, lat_emphasis_pull: 1 };
+
+    const alignment = evaluateGoalAlignment(goalContext, exposure, roles);
+    assert.ok(alignment.alignmentScore >= 0 && alignment.alignmentScore <= 1);
+    assert.equal(alignment.profile, "v_taper");
+    assert.ok(alignment.emphasisedRoles.includes("lateral_delt_isolation"));
+    assert.deepEqual(
+      evaluateGoalAlignment(goalContext, exposure, roles),
+      alignment,
+      "goal alignment is deterministic",
     );
   });
 
+  await t.test("trendDetection.detectTrend analyses a metric series", () => {
+    const insufficient = detectTrend([
+      { date: "2026-08-20", value: 80.2 },
+      { date: "2026-08-21", value: 80.4 },
+    ]);
+    assert.equal(insufficient.direction, "insufficient_data");
+    assert.equal(insufficient.slopePerDay, null);
+    assert.ok(insufficient.warnings.length > 0);
+
+    const series = () =>
+      ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05"].map(
+        (date, index) => ({ date, value: 80 + index * 0.3 }),
+      );
+    const rising = detectTrend(series());
+    assert.equal(rising.direction, "increasing");
+    assert.ok((rising.slopePerDay ?? 0) > 0);
+    assert.ok((rising.confidence ?? 0) > 0.5);
+    assert.deepEqual(detectTrend(series()), rising, "trend analysis is deterministic");
+  });
+});
+
+test("deferred diagnosis modules remain explicit stubs", async (t) => {
   await t.test("diagnosis.runDiagnoses throws", () => {
     assert.throws(
       () =>

@@ -21,6 +21,8 @@ import {
 } from "./coaching";
 import type { EquipmentRepository } from "./equipment";
 import { PrismaEquipmentRepository } from "./equipment";
+import type { TrainingEnvironmentRepository } from "./environments";
+import { PrismaTrainingEnvironmentRepository } from "./environments";
 import type { GoalRepository } from "./goals";
 import { PrismaGoalRepository } from "./goals";
 import type { ProfileRepository, UserRepository } from "./identity";
@@ -35,6 +37,8 @@ import {
 } from "./nutrition";
 import type { ExercisePreferenceRepository } from "./preferences";
 import { PrismaExercisePreferenceRepository } from "./preferences";
+import type { ProgressionLedgerRepository } from "./progression";
+import { PrismaProgressionLedgerRepository } from "./progression";
 import type { TrainingPlanRepository, WorkoutRepository } from "./training";
 import { PrismaTrainingPlanRepository, PrismaWorkoutRepository } from "./training";
 
@@ -42,11 +46,13 @@ export * from "./body";
 export * from "./catalog";
 export * from "./coaching";
 export * from "./equipment";
+export * from "./environments";
 export * from "./goals";
 export * from "./identity";
 export * from "./knowledge";
 export * from "./nutrition";
 export * from "./preferences";
+export * from "./progression";
 export * from "./training";
 export { runDb, boundedLimit } from "./util";
 
@@ -63,6 +69,8 @@ export interface Repositories {
   knowledge: KnowledgeRepository;
   exercisePreferences: ExercisePreferenceRepository;
   trainingPlans: TrainingPlanRepository;
+  trainingEnvironments: TrainingEnvironmentRepository;
+  progressionLedger: ProgressionLedgerRepository;
   workouts: WorkoutRepository;
   bodyMeasurements: BodyMeasurementRepository;
   activity: ActivityRepository;
@@ -85,6 +93,8 @@ export function createRepositories(prisma: PrismaClient): Repositories {
     knowledge: new PrismaKnowledgeRepository(prisma),
     exercisePreferences: new PrismaExercisePreferenceRepository(prisma),
     trainingPlans: new PrismaTrainingPlanRepository(prisma),
+    trainingEnvironments: new PrismaTrainingEnvironmentRepository(prisma),
+    progressionLedger: new PrismaProgressionLedgerRepository(prisma),
     workouts: new PrismaWorkoutRepository(prisma),
     bodyMeasurements: new PrismaBodyMeasurementRepository(prisma),
     activity: new PrismaActivityRepository(prisma),

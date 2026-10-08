@@ -27,11 +27,17 @@ Layout:
 ```text
 packages/db/
 ├── prisma/
-│   ├── schema.prisma            # 37 domain models (clusters A–E)
+│   ├── schema.prisma            # 53 domain models (clusters A–E)
 │   └── migrations/
 │       ├── migration_lock.toml  # provider = postgresql
-│       └── 0001_init/
-│           └── migration.sql    # generated core + ~400 lines hand-written SQL
+│       ├── 0001_init/
+│       │   └── migration.sql    # generated core + ~400 lines hand-written SQL
+│       ├── 0002_phase2_exercise_knowledge/
+│       │   └── migration.sql    # Phase 2 knowledge constraints/indexes
+│       ├── 0003_phase3_adaptive_training/
+│       │   └── migration.sql    # plan-version lifecycle + decisions/constraints/rules
+│       └── 0004_phase31_progression_ledger_and_environments/
+│           └── migration.sql    # environments + progression ledger + freedom columns
 └── src/
     ├── index.ts                 # barrel (ids, errors, client, mapping, repositories, seed, testing)
     ├── ids.ts                   # UUIDv7 generation/parse/order
@@ -122,9 +128,12 @@ boots PostgreSQL.
 
 ## 4. Schema and migrations
 
-* **`schema.prisma`** — 37 domain models covering design clusters A–E
+* **`schema.prisma`** — 53 domain models covering design clusters A–E
   (identity/profile, goals + versioning, training/plans/workouts, body +
-  activity, nutrition, coaching). Text columns + CHECK constraints mirror the
+  activity, nutrition, coaching). Phase 3 added `TrainingPlanDecision`,
+  `TrainingPlanConstraint` and `TrainingPlanProgressionRule`; Phase 3.1 added
+  `TrainingEnvironmentPeriod`, `ProgressionEvaluation` and
+  `ProgressionDecisionEvent`. Text columns + CHECK constraints mirror the
   domain union types (Prisma enums were rejected in the design).
 * **`migrations/0001_init/migration.sql`** (1370 lines) = two layers:
   1. the `prisma migrate diff --from-empty` core (tables, FKs, basic indexes);
@@ -167,7 +176,9 @@ Never edit an already-deployed migration; add a new one.
 
 `npm run db:seed` — safe to run repeatedly (natural-key upserts, fixed ids):
 
-* 10 equipment, 16 muscles, 12 exercises (relations rebuilt declaratively);
+* 21 equipment, 28 muscles (19 structures), 73 exercises — 32 of them
+  genuinely equipment-free after Phase 3.1.1 (relations rebuilt
+  declaratively);
 * 3 fixture foods + servings under a labeled fixture source;
 * dev user `dev@fitcoach.local` (timezone `Asia/Kolkata`) with a profile.
 
@@ -189,7 +200,7 @@ Application code depends on the `Repositories` bundle only; nothing outside
 | `PrismaGoalRepository` | goals | interval versioning: supersession closes the old row in-txn; one active per user |
 | `PrismaEquipmentRepository` | equipment | catalog upsert by slug; point-in-time `listUserEquipment(userId, at)` |
 | `PrismaExerciseRepository` | catalog | muscle/exercise upsert by slug; relation replacement |
-| `PrismaTrainingPlanRepository` | plan | versions append (`version_number` = max+1); content rows are append-only |
+| `PrismaTrainingPlanRepository` | plan | versions append (`version_number` = max+1) and supersede the previous active one in the same transaction; content rows are append-only, only the version's lifecycle columns may move; Phase 3 adds `recordDecision`/`listDecisions`, `replaceConstraints`/`listConstraints` (transactional delete + insert) and `setProgressionRule`/`listProgressionRules` |
 | `PrismaWorkoutRepository` | workout | idempotent on `(user, clientRequestId)` with race recovery; freeze after final |
 | `PrismaBodyMeasurementRepository` | measurements | append-only; idempotent on `(user, entered_via, external_id)` |
 | `PrismaActivityRepository` | activity | race-free step upsert (max-wins, raw SQL `ON CONFLICT`); cardio dedupe on `external_id` |
@@ -199,6 +210,8 @@ Application code depends on the `Repositories` bundle only; nothing outside
 | `PrismaDiagnosisRepository` | diagnosis | evidence append-only; status transitions only |
 | `PrismaRecommendationRepository` | recommendation | evidence copied at write time (never linked); lifecycle-only status |
 | `PrismaInterventionRepository` | intervention | one outcome per `(intervention, evaluation_window)`; explicit supersession chain |
+| `PrismaTrainingEnvironmentRepository` | training environments | interval versioning: `createPeriod` closes the open row in-txn; only `effective_to` may move |
+| `PrismaProgressionLedgerRepository` | progression ledger | append-only evaluations/events; idempotent on `(user, fingerprint)` and `(evaluation, idempotency_key)` |
 
 Cross-cutting rules:
 
@@ -218,9 +231,10 @@ Cross-cutting rules:
 
 | Suite | Command | Needs DB | Count |
 |---|---|---|---|
-| Unit (all packages) | `npm test` | no | 55 |
-| DB integration | `npm run test:integration -w @fitcoach/db` | yes | 14 |
-| API smoke | `npm run test:smoke -w @fitcoach/api` | yes | 9 |
+| Unit (all packages) | `npm test` | no | 332 |
+| DB integration | `npm run test:integration -w @fitcoach/db` | yes | 22 |
+| API smoke | `npm run test:smoke -w @fitcoach/api` | yes | 11 |
+| No-equipment week (acceptance) | `npm run test:no-equipment-week -w @fitcoach/api` | yes | 1 |
 
 Integration/smoke setup (`startTestPostgres`):
 
@@ -247,7 +261,13 @@ Coverage highlights:
   deferred-FK history rows;
 * **API smoke** — real HTTP against real services: validation envelopes that
   never echo submitted values, 404/405/409/409-frozen mappings, timezone
-  defaults, idempotent replay, snapshot totals.
+  defaults, idempotent replay, snapshot totals;
+* **Phase 3.1** — training-environment intervals (create closes the open row,
+  day-boundary inclusivity, cross-user isolation), the progression ledger
+  (fingerprint dedupe, append-only triggers, decision-event idempotency per
+  submission key), a temporary plan coexisting with the primary plan it was
+  adapted from, and workouts/sets carrying environment + classification +
+  load-kind with the matching CHECK domains.
 
 ## 8. API structure (`apps/api`)
 
@@ -257,7 +277,9 @@ server.ts       createServer({ services? }) — example/health routes always; DB
 routes.ts       /v0 route table — parse → validate → service → respond (no storage details)
 validation.ts   fail-fast field helpers; error messages state the rule, never the value
 http.ts         router with :param matching, 1 MB body cap, stable error envelope
-services/       use-case layer (identity, body, training, nutrition, coaching) — owns defaults (timezone-derived dates, active-goal/plan resolution)
+services/       use-case layer (identity, body, training, planner, nutrition, coaching) — owns defaults
+                (timezone-derived dates, active-goal/plan resolution); `planner.ts` is the Phase 3
+                adaptive planner (context → pure engines → persisted version/decisions)
 ```
 
 Route inventory (all under `/v0`):
@@ -273,6 +295,16 @@ POST   /v0/users/:userId/equipment                GET    /v0/users/:userId/equip
 POST   /v0/users/:userId/measurements             GET    /v0/users/:userId/measurements[?limit&from&to]
 POST   /v0/users/:userId/training-plans           GET    /v0/users/:userId/training-plans[/active]
 POST   /v0/users/:userId/training-plans/:planId/versions   GET /v0/users/:userId/training-plans/:planId
+POST   /v0/users/:userId/training-plans/generate           GET /v0/users/:userId/training-state   (Phase 3)
+GET    /v0/users/:userId/training-plans/:planId/versions/:versionNumber
+POST   /v0/users/:userId/training-plans/:planId/adapt
+GET    /v0/users/:userId/training-plans/:planId/{compare?from&to|decisions|constraints|coverage|progression}[?version=]
+POST   /v0/users/:userId/training-environments             GET /v0/users/:userId/training-environments  (Phase 3.1)
+GET    /v0/users/:userId/training-environments/active[?asOf]        POST /v0/users/:userId/training-environments/restore
+GET    /v0/users/:userId/training-continuity[?asOf]       POST /v0/users/:userId/training-plans/generate-temporary
+GET    /v0/users/:userId/performance-history[?exerciseId&limit]
+POST   /v0/users/:userId/progression/evaluate             GET  /v0/users/:userId/progression/ledger
+POST   /v0/users/:userId/progression/ledger/:evaluationId/events
 POST   /v0/users/:userId/workouts                 GET    /v0/users/:userId/workouts[?limit&from&to]
 GET    /v0/users/:userId/workouts/:workoutId
 POST   /v0/users/:userId/workouts/:workoutId/exercises | /sets | /complete
@@ -337,7 +369,20 @@ Other decisions worth explicit approval:
    parameters — meals, body metrics and notes are health data).
 4. **`PUT /profile` replaces** (see §8) rather than merges.
 5. **Hand-written SQL lives inside `0001_init`** instead of follow-up
-   migrations, because Phase 1 ships one atomic baseline.
+   migrations, because Phase 1 ships one atomic baseline. Later phases add
+   their own migration (`0002_phase2_exercise_knowledge`,
+   `0003_phase3_adaptive_training`,
+   `0004_phase31_progression_ledger_and_environments`) rather than editing the
+   baseline — `0003` extends `training_plan_versions` with lifecycle/generation
+   metadata, backfills older versions to `superseded`, replaces the blanket
+   append-only trigger with a lifecycle-only guard, adds the one-active-version
+   partial unique index, and creates the append-only `training_plan_decisions`,
+   `training_plan_constraints` and `training_plan_progression_rules` tables.
+   `0004` adds `training_environment_periods`, `progression_evaluations` and
+   `progression_decision_events`, extends `training_plans` / `workouts` /
+   `workout_exercises` / `exercise_sets` with defaulted or nullable columns, and
+   re-scopes the one-active-plan index to `kind = 'primary'` so a temporary
+   environment plan can coexist with the primary plan.
 
 ## 10. Security checklist (milestone §15)
 

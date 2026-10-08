@@ -28,6 +28,7 @@ import {
   toRepositoryError,
 } from "../errors";
 import { SEED_FIXED_IDS } from "../seed/fixtures";
+import { BODYWEIGHT_EXERCISES } from "../seed/knowledgeExercisesBodyweight";
 import { KNOWLEDGE_EXERCISES, KNOWLEDGE_SUBSTITUTIONS } from "../seed/knowledgeExercises";
 import {
   KNOWLEDGE_EQUIPMENT,
@@ -344,5 +345,126 @@ test("knowledge fixtures are internally consistent", () => {
   // Every major muscle group used by training logic has a fixture muscle.
   for (const slug of ["pectoralis_major", "latissimus_dorsi", "quadriceps", "hamstrings"]) {
     assert.ok(muscleSlugs.has(slug), `fixture muscle ${slug} present`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3.1.1 — equipment-free catalogue invariants (pure, no database)
+// ---------------------------------------------------------------------------
+
+test("aliases never collide with another exercise's slug or alias", () => {
+  const slugs = new Set(KNOWLEDGE_EXERCISES.map((item) => item.slug));
+  const seen = new Map<string, string>();
+  for (const exercise of KNOWLEDGE_EXERCISES) {
+    for (const alias of exercise.aliases ?? []) {
+      const key = alias.toLowerCase();
+      assert.ok(!slugs.has(key), `alias "${alias}" on ${exercise.slug} shadows a canonical slug`);
+      const owner = seen.get(key);
+      assert.ok(!owner, `alias "${alias}" is declared by both ${owner} and ${exercise.slug}`);
+      seen.set(key, exercise.slug);
+    }
+  }
+});
+
+test("equipment-free entries genuinely require nothing and stay honest about pulling", () => {
+  const equipmentFree = KNOWLEDGE_EXERCISES.filter((item) => item.equipment.length === 0);
+  assert.ok(
+    equipmentFree.length >= 25,
+    `expected a materially expanded no-equipment catalogue, found ${equipmentFree.length}`,
+  );
+
+  for (const exercise of BODYWEIGHT_EXERCISES) {
+    assert.deepEqual([...exercise.equipment], [], `${exercise.slug} must require no equipment`);
+    assert.equal(
+      exercise.loadingCharacteristic,
+      "bodyweight_only",
+      `${exercise.slug} loading is bodyweight-only`,
+    );
+    assert.ok(
+      exercise.relations.some((relation) => relation.role === "primary_mover"),
+      `${exercise.slug} must declare a primary mover (the planner cannot select it otherwise)`,
+    );
+    assert.ok(exercise.movementFunctions.length > 0, `${exercise.slug} has movement functions`);
+    assert.ok(exercise.movementPattern !== undefined, `${exercise.slug} has a movement pattern`);
+  }
+
+  // Pulling honesty: nothing equipment-free may pose as a pull, and nothing
+  // equipment-free may claim the lats or biceps as a primary target.
+  for (const exercise of equipmentFree) {
+    assert.ok(
+      exercise.movementPattern !== "horizontal_pull" && exercise.movementPattern !== "vertical_pull",
+      `${exercise.slug} is not a pulling pattern`,
+    );
+    assert.ok(
+      !exercise.relations.some(
+        (relation) =>
+          relation.role === "primary_mover" &&
+          (relation.muscle === "latissimus_dorsi" || relation.muscle === "biceps_brachii"),
+      ),
+      `${exercise.slug} must not claim a pulling primary with no equipment`,
+    );
+  }
+});
+
+test("the no-equipment universe covers the categories a home week needs", () => {
+  const equipmentFree = KNOWLEDGE_EXERCISES.filter((item) => item.equipment.length === 0);
+  const primaryFor = (muscle: string) =>
+    equipmentFree.filter((item) =>
+      item.relations.some((relation) => relation.muscle === muscle && relation.role === "primary_mover"),
+    );
+  const withPattern = (pattern: string) =>
+    equipmentFree.filter((item) => item.movementPattern === pattern);
+
+  assert.ok(withPattern("squat").length >= 2, "knee-dominant squat coverage");
+  assert.ok(withPattern("lunge").length >= 2, "lunge coverage");
+  assert.ok(withPattern("hinge").length >= 2, "hip-dominant hinge coverage");
+  assert.ok(primaryFor("quadriceps").length >= 2, "quadriceps");
+  assert.ok(primaryFor("gluteus_maximus").length >= 2, "glutes");
+  assert.ok(primaryFor("hamstrings").length >= 2, "hamstrings");
+  assert.ok(primaryFor("gastrocnemius").length >= 1, "gastrocnemius");
+  assert.ok(primaryFor("soleus").length >= 1, "soleus");
+  assert.ok(primaryFor("pectoralis_major").length >= 2, "chest");
+  assert.ok(primaryFor("deltoid_front").length >= 1, "shoulders");
+  assert.ok(primaryFor("triceps_brachii").length >= 1, "triceps");
+  assert.ok(primaryFor("erector_spinae").length >= 1, "spinal erectors");
+  assert.ok(primaryFor("rectus_abdominis").length >= 1, "rectus abdominis");
+  assert.ok(primaryFor("transversus_abdominis").length >= 1, "transversus");
+  assert.ok(primaryFor("obliques").length >= 1, "obliques");
+});
+
+test("bodyweight progression families share a variation-key prefix", () => {
+  const families = new Map<string, string[]>();
+  for (const exercise of KNOWLEDGE_EXERCISES) {
+    const prefix = exercise.variationKey.split(":")[0]!;
+    families.set(prefix, [...(families.get(prefix) ?? []), exercise.slug]);
+  }
+
+  for (const family of ["squat", "push_up", "glute_bridge", "calf_raise", "lunge"]) {
+    const members = families.get(family) ?? [];
+    assert.ok(
+      members.length >= 2,
+      `${family} must be a progression family (>= 2 variations), found ${members.join(", ") || "none"}`,
+    );
+  }
+});
+
+test("equipment-free substitutions never claim a floor movement replaces loaded pulling", () => {
+  const bySlug = new Map(KNOWLEDGE_EXERCISES.map((item) => [item.slug, item]));
+  for (const substitution of KNOWLEDGE_SUBSTITUTIONS) {
+    const substitute = bySlug.get(substitution.substitute)!;
+    if (substitute.equipment.length > 0) continue;
+    // An equipment-free substitute for a pulling movement must be worded as
+    // partial and must be ranked as the weak option it honestly is.
+    const source = bySlug.get(substitution.exercise)!;
+    if (source.movementPattern === "horizontal_pull" || source.movementPattern === "vertical_pull") {
+      assert.ok(
+        (substitution.rankHint ?? 0) === 0,
+        `${substitution.exercise} -> ${substitution.substitute} must not be promoted over a real pull`,
+      );
+      assert.ok(
+        /partial|cannot|never/i.test(substitution.reason),
+        `${substitution.exercise} -> ${substitution.substitute} must state its limitation`,
+      );
+    }
   }
 });

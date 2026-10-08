@@ -8,7 +8,15 @@ import type {
   WorkoutHistoryQuery,
   WorkoutRecord,
 } from "@fitcoach/db";
-import type { SetKind, Timestamp, WorkoutStatus } from "@fitcoach/domain";
+import type {
+  PerformanceLoadKind,
+  PerformanceSource,
+  SessionClassification,
+  SetKind,
+  Timestamp,
+  TrainingEnvironmentKind,
+  WorkoutStatus,
+} from "@fitcoach/domain";
 import { ConflictError, NotFoundError } from "@fitcoach/db";
 
 /**
@@ -37,6 +45,10 @@ export interface CreateWorkoutCommand {
   endedAt?: Timestamp;
   notes?: string;
   clientRequestId?: string;
+  /** Environment the session was actually performed in (Phase 3.1 §12). */
+  environmentKind?: TrainingEnvironmentKind;
+  /** planned | adapted | makeup | unplanned (Phase 3.1 §23). */
+  sessionClassification?: SessionClassification;
 }
 
 export interface RecordSetCommand {
@@ -53,6 +65,22 @@ export interface RecordSetCommand {
   rir?: number;
   rpe?: number;
   notes?: string;
+  /** Declared load kind; inferred from columns when omitted (Phase 3.1 §4). */
+  loadKind?: PerformanceLoadKind;
+  /** Assistance that reduced effective load, kg (assisted bodyweight). */
+  assistanceLoadKg?: number;
+  /** Set-level idempotency key: a replay returns the same row (§32). */
+  clientRequestId?: string;
+}
+
+/** Optional Phase 3.1 metadata on a workout-exercise group. */
+export interface RecordExerciseOptions {
+  /** Planned slot this group fulfils. */
+  slotId?: string;
+  /** Exercise this one replaced, when performed as a substitution. */
+  substitutedFromExerciseId?: string;
+  performanceSource?: PerformanceSource;
+  substitutionReason?: string;
 }
 
 export class TrainingService {
@@ -115,13 +143,22 @@ export class TrainingService {
       ...(command.endedAt ? { endedAt: command.endedAt } : {}),
       ...(command.notes !== undefined ? { notes: command.notes } : {}),
       ...(command.clientRequestId ? { clientRequestId: command.clientRequestId } : {}),
+      ...(command.environmentKind ? { environmentKind: command.environmentKind } : {}),
+      ...(command.sessionClassification
+        ? { sessionClassification: command.sessionClassification }
+        : {}),
     };
     return this.repos.workouts.create(input);
   }
 
   async recordExercise(
     workoutId: string,
-    command: { exerciseId: string; position?: number; notes?: string },
+    command: {
+      exerciseId: string;
+      position?: number;
+      notes?: string;
+      options?: RecordExerciseOptions;
+    },
   ) {
     await this.requireWorkout(workoutId);
     return this.repos.workouts.addExercise(
@@ -129,6 +166,7 @@ export class TrainingService {
       command.exerciseId,
       command.position,
       command.notes,
+      command.options,
     );
   }
 
@@ -174,6 +212,13 @@ export class TrainingService {
       ...(command.rir !== undefined ? { rir: command.rir } : {}),
       ...(command.rpe !== undefined ? { rpe: command.rpe } : {}),
       ...(command.notes !== undefined ? { notes: command.notes } : {}),
+      ...(command.loadKind !== undefined ? { loadKind: command.loadKind } : {}),
+      ...(command.assistanceLoadKg !== undefined
+        ? { assistanceLoadKg: command.assistanceLoadKg }
+        : {}),
+      ...(command.clientRequestId !== undefined
+        ? { clientRequestId: command.clientRequestId }
+        : {}),
     });
   }
 

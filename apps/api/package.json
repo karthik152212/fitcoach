@@ -13,7 +13,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=../.env dist/index.js",
     "test": "node --env-file-if-exists=../.env --test dist/__tests__/server.test.js",
-    "test:smoke": "node --env-file-if-exists=../.env dist/__tests__/smoke.js"
+    "test:smoke": "node --env-file-if-exists=../.env dist/__tests__/smoke.js",
+    "test:no-equipment-week": "node --env-file-if-exists=../.env dist/__tests__/noEquipmentWeek.js"
   },
   "dependencies": {
     "@fitcoach/db": "*",

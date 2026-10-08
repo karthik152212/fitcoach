@@ -1,6 +1,6 @@
 # Technical Architecture v2.0
 
-Architecture/design revision: 2026-10-05. Supersedes v0.1.
+Architecture/design revision: 2026-10-07. Supersedes v0.1.
 Product requirements: `docs/PRODUCT_SPEC.md`.
 Persistence: `docs/DATABASE_DESIGN.md` (design) and
 `docs/DATABASE_IMPLEMENTATION.md` (Phase 1 reality).
@@ -56,7 +56,7 @@ repositories. Nothing in `packages/domain`, `packages/fitness-core` or
 | `packages/nutrition` | deterministic nutrient, serving, recipe, meal, day and trend logic | I/O, persistence, AI |
 | `packages/db` | PostgreSQL schema, migrations, repositories, seed | domain logic |
 | `packages/ai` | natural-language parsing, explanation, presentation | facts, numbers, diagnoses |
-| `apps/api` | HTTP transport, validation, application services | domain logic |
+| `apps/api` | HTTP transport, validation, application services (including `TrainingPlannerService`, which loads context and persists plans) | domain logic |
 
 ## 4. Dashboard as an aggregation layer
 
@@ -196,6 +196,29 @@ OBSERVATIONS → DERIVED FACTS → EVIDENCE → DIAGNOSIS → RECOMMENDATION
   underlying data changes.
 - `NO_CHANGE` is a first-class intervention (`InterventionKind` already
   includes `no_change`), and "uncertain" outcomes are representable.
+- The training side implements the same chain (Phase 3): a plan version is the
+  intervention, `training_plan_decisions` is the evidence row (reason codes,
+  satisfied/violated constraints, before/after snapshots, config version),
+  `training_plan_constraints` records what was evaluated, and
+  `training_plan_progression_rules` freezes the progression scheme that was
+  prescribed. A `no_change` adaptation still writes a decision and does not
+  create a version.
+- Phase 3.1 extends the same chain below the plan: `progression_evaluations` is
+  the immutable evidence/recommendation row for one exercise (idempotent on a
+  fingerprint) and `progression_decision_events` records what the user did and
+  what was actually performed (idempotent per submission key). Both are
+  append-only, so "recommended", "accepted" and "performed" are permanently
+  distinguishable rather than collapsed into a mutable status.
+- Training environments are interval-versioned state
+  (`training_environment_periods`), and a temporary environment-adapted plan is
+  its own bounded plan linked to the primary version it was adapted from — the
+  primary plan is never rewritten to represent a temporary absence of equipment.
+- Phase 3.1.1 keeps that chain intact and widens only the knowledge layer:
+  equipment-free exercises are modelled with an empty required-equipment set
+  (the user's body needs no ownership row), and the planner bridges the
+  group-level tracked volume vocabulary (`calves`, `abdominals`, …) to the
+  catalog's muscle-level slugs at assignment time — a composition-root
+  translation, not a new engine.
 
 ## 12. AI boundary
 
