@@ -176,18 +176,25 @@ CREATE TABLE "exercises" (
 CREATE TABLE "exercise_required_equipment" (
     "exercise_id" UUID NOT NULL,
     "equipment_id" UUID NOT NULL,
+    "priority" SMALLINT NOT NULL,
+    "quantity" SMALLINT NOT NULL DEFAULT 1,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "exercise_required_equipment_pkey" PRIMARY KEY ("exercise_id","equipment_id")
 );
 
 -- CreateTable
 CREATE TABLE "exercise_muscle_relations" (
+    "id" UUID NOT NULL,
     "exercise_id" UUID NOT NULL,
     "muscle_id" UUID NOT NULL,
+    "external_source_id" UUID,
     "role" TEXT NOT NULL,
-    "contribution_weight" DECIMAL(4,3),
+    "emphasis" DECIMAL(3,2) NOT NULL,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT "exercise_muscle_relations_pkey" PRIMARY KEY ("exercise_id","muscle_id","role")
+    CONSTRAINT "exercise_muscle_relations_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
