@@ -1,0 +1,23 @@
+{
+  "name": "@fitcoach/supabase",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Supabase client initialization and configuration for FitCoach.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "devDependencies": {
+    "@fitcoach/domain": "*",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
