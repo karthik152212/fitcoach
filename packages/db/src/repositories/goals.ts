@@ -95,6 +95,12 @@ export interface CreateGoalInput {
   physiqueTarget?: PhysiqueTarget;
 }
 
+export interface GoalStateSnapshot {
+  activeGoal: GoalRecord | null;
+  goalHistory: GoalRecord[];
+  daysSinceGoalStart: number;
+}
+
 export interface GoalRepository {
   /**
    * Create a goal version. Any currently active goal is closed
@@ -106,6 +112,8 @@ export interface GoalRepository {
   /** All versions, newest effective_from first. */
   history(userId: string): Promise<GoalRecord[]>;
   findById(id: string): Promise<GoalRecord | null>;
+  /** Get a state snapshot for unified decision brain. */
+  getStateSnapshot(userId: string, asOf: CalendarDate): Promise<GoalStateSnapshot | null>;
 }
 
 function parseDate(value: CalendarDate, field: string): Date {
@@ -227,5 +235,26 @@ export class PrismaGoalRepository implements GoalRepository {
 
   async findById(id: string): Promise<GoalRecord | null> {
     return runDb(() => this.load(id));
+  }
+
+  async getStateSnapshot(userId: string, asOf: CalendarDate): Promise<GoalStateSnapshot | null> {
+    return runDb(async () => {
+      const [activeGoal, history] = await Promise.all([
+        this.active(userId),
+        this.history(userId),
+      ]);
+
+      if (!activeGoal) return null;
+
+      const asOfDate = new Date(`${asOf}T00:00:00.000Z`);
+      const startDate = new Date(activeGoal.effectiveFrom);
+      const daysSinceGoalStart = Math.floor((asOfDate.getTime() - startDate.getTime()) / 86400000);
+
+      return {
+        activeGoal,
+        goalHistory: history,
+        daysSinceGoalStart: Math.max(0, daysSinceGoalStart),
+      };
+    });
   }
 }

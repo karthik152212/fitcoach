@@ -31,6 +31,8 @@ export interface RouteContext {
   params: Record<string, string>;
   query: URLSearchParams;
   body: Record<string, unknown>;
+  /** HTTP request headers (lowercased keys). */
+  headers: Record<string, string>;
 }
 
 export interface RouteResult {
@@ -89,7 +91,12 @@ export function sendError(response: http.ServerResponse, error: unknown): void {
   }
   // Unknown failure: log the class only (messages can carry request context).
   const name = error instanceof Error ? error.name : typeof error;
-  process.stderr.write(`[api] unhandled error: ${name}\n`);
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  process.stderr.write(`[api] unhandled error: ${name}: ${message}\n`);
+  if (stack) {
+    process.stderr.write(`${stack}\n`);
+  }
   sendJson(response, 500, { error: "internal_error", message: "internal server error" });
 }
 
@@ -192,6 +199,9 @@ export class Router {
         params: matched.params,
         query: url.searchParams,
         body,
+        headers: Object.fromEntries(
+          Object.entries(request.headers).filter(([, v]) => v !== undefined)
+        ) as Record<string, string>,
       });
       sendJson(response, result.status ?? 200, result.body);
     } catch (error) {

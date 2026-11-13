@@ -23,6 +23,9 @@ logs/
 *.log
 npm-debug.log*
 
+# Local browser-QA artifacts
+.playwright-cli/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
@@ -31,3 +34,11 @@ desktop.ini
 .vscode/
 *.swp
 *.swo
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+
+# Local dev stack (embedded PostgreSQL data)
+.devstack/

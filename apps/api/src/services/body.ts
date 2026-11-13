@@ -9,6 +9,14 @@ import type {
   RecordMeasurementInput,
   RecordStepsInput,
   UserRepository,
+  SleepRepository,
+  RecoveryRepository,
+  SleepObservationRecord,
+  RecoveryIndicatorRecord,
+  RecordSleepInput,
+  RecordRecoveryIndicatorInput,
+  SleepHistoryQuery,
+  RecoveryHistoryQuery,
 } from "@fitcoach/db";
 import type { ActivityKind, CalendarDate, Timestamp } from "@fitcoach/domain";
 import { toUserLocalDate } from "@fitcoach/domain";
@@ -151,5 +159,125 @@ export class ActivityService {
     const user = await this.users.findById(userId);
     if (!user) throw new NotFoundError(`user ${userId} not found`);
     return this.activity.history(userId, query);
+  }
+}
+
+export interface RecordSleepCommand {
+  id?: string;
+  date?: CalendarDate;
+  startedAt: Timestamp;
+  endedAt: Timestamp;
+  timeInBedMinutes?: number;
+  asleepMinutes?: number;
+  efficiency?: number;
+  latencyMinutes?: number;
+  deepMinutes?: number;
+  remMinutes?: number;
+  lightMinutes?: number;
+  awakeMinutes?: number;
+  awakenings?: number;
+  source: string;
+  externalId?: string;
+  confidence: string;
+  notes?: string;
+}
+
+export interface RecordRecoveryIndicatorCommand {
+  id?: string;
+  date?: CalendarDate;
+  hrvMs?: number;
+  restingHeartRateBpm?: number;
+  sleepScore?: number;
+  readinessScore?: number;
+  muscleSoreness?: number;
+  fatigue?: number;
+  sleepQuality?: number;
+  readinessSubjective?: number;
+  source: string;
+  externalId?: string;
+  confidence: string;
+  notes?: string;
+}
+
+export class SleepService {
+  constructor(
+    private readonly sleep: SleepRepository,
+    private readonly users: UserRepository,
+  ) {}
+
+  private async requireUser(userId: string): Promise<void> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError(`user ${userId} not found`);
+  }
+
+  async record(userId: string, command: RecordSleepCommand): Promise<SleepObservationRecord> {
+    await this.requireUser(userId);
+    const date = command.date ?? toUserLocalDate(new Date(), (await this.users.findById(userId))!.timezone);
+    const input: RecordSleepInput = {
+      ...(command.id ? { id: command.id } : {}),
+      userId,
+      date,
+      startedAt: command.startedAt,
+      endedAt: command.endedAt,
+      ...(command.timeInBedMinutes !== undefined ? { timeInBedMinutes: command.timeInBedMinutes } : {}),
+      ...(command.asleepMinutes !== undefined ? { asleepMinutes: command.asleepMinutes } : {}),
+      ...(command.efficiency !== undefined ? { efficiency: command.efficiency } : {}),
+      ...(command.latencyMinutes !== undefined ? { latencyMinutes: command.latencyMinutes } : {}),
+      ...(command.deepMinutes !== undefined ? { deepMinutes: command.deepMinutes } : {}),
+      ...(command.remMinutes !== undefined ? { remMinutes: command.remMinutes } : {}),
+      ...(command.lightMinutes !== undefined ? { lightMinutes: command.lightMinutes } : {}),
+      ...(command.awakeMinutes !== undefined ? { awakeMinutes: command.awakeMinutes } : {}),
+      ...(command.awakenings !== undefined ? { awakenings: command.awakenings } : {}),
+      source: command.source,
+      ...(command.externalId ? { externalId: command.externalId } : {}),
+      confidence: command.confidence,
+      ...(command.notes ? { notes: command.notes } : {}),
+    };
+    return this.sleep.record(input);
+  }
+
+  async history(userId: string, query: SleepHistoryQuery = {}): Promise<SleepObservationRecord[]> {
+    await this.requireUser(userId);
+    return this.sleep.history(userId, query);
+  }
+}
+
+export class RecoveryService {
+  constructor(
+    private readonly recovery: RecoveryRepository,
+    private readonly users: UserRepository,
+  ) {}
+
+  private async requireUser(userId: string): Promise<void> {
+    const user = await this.users.findById(userId);
+    if (!user) throw new NotFoundError(`user ${userId} not found`);
+  }
+
+  async record(userId: string, command: RecordRecoveryIndicatorCommand): Promise<RecoveryIndicatorRecord> {
+    await this.requireUser(userId);
+    const date = command.date ?? toUserLocalDate(new Date(), (await this.users.findById(userId))!.timezone);
+    const input: RecordRecoveryIndicatorInput = {
+      ...(command.id ? { id: command.id } : {}),
+      userId,
+      date,
+      ...(command.hrvMs !== undefined ? { hrvMs: command.hrvMs } : {}),
+      ...(command.restingHeartRateBpm !== undefined ? { restingHeartRateBpm: command.restingHeartRateBpm } : {}),
+      ...(command.sleepScore !== undefined ? { sleepScore: command.sleepScore } : {}),
+      ...(command.readinessScore !== undefined ? { readinessScore: command.readinessScore } : {}),
+      ...(command.muscleSoreness !== undefined ? { muscleSoreness: command.muscleSoreness } : {}),
+      ...(command.fatigue !== undefined ? { fatigue: command.fatigue } : {}),
+      ...(command.sleepQuality !== undefined ? { sleepQuality: command.sleepQuality } : {}),
+      ...(command.readinessSubjective !== undefined ? { readinessSubjective: command.readinessSubjective } : {}),
+      source: command.source,
+      ...(command.externalId ? { externalId: command.externalId } : {}),
+      confidence: command.confidence,
+      ...(command.notes ? { notes: command.notes } : {}),
+    };
+    return this.recovery.record(input);
+  }
+
+  async history(userId: string, query: RecoveryHistoryQuery = {}): Promise<RecoveryIndicatorRecord[]> {
+    await this.requireUser(userId);
+    return this.recovery.history(userId, query);
   }
 }

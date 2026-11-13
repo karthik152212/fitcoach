@@ -9,13 +9,13 @@
  */
 
 // Shared
-export { getEnv, resetEnvCache, requireEnv, type ValidatedEnv, ConfigError } from "./shared/env";
+export { getEnv, resetEnvCache, requireEnv, type ValidatedEnv, ConfigError } from "./shared/env.js";
 
 // Server
-export { getServerSupabase, createServerSupabaseWithAuth, resetServerSupabase } from "./server/client";
+export { getServerSupabase, createServerSupabaseWithAuth, resetServerSupabase } from "./server/client.js";
 
 // Browser
-export { getBrowserSupabase, resetBrowserSupabase, getBrowserSession, signOut } from "./browser/client";
+export { getBrowserSupabase, resetBrowserSupabase, getBrowserSession, signOut } from "./browser/client.js";
 
 // Database
-export { getDatabaseUrl, getPooledDatabaseUrl, createPrismaClient } from "./shared/database";
+export { getDatabaseUrl, getPooledDatabaseUrl, createPrismaClient } from "./shared/database.js";

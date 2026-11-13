@@ -1,0 +1,635 @@
+# Phase 9.5 Implementation Plan — AI Coach Production Infrastructure
+
+**Status**: Planning (awaiting approval)
+**Based on**: Architecture decisions approved by project owner
+**Dependencies**: Phase 9.4 complete (all tests passing, build clean)
+
+---
+
+## 1. Executive Summary
+
+Phase 9.5 transforms the AI Coach from a mock-backed prototype into a production-ready system with:
+- **Real AI provider integration** (Anthropic/OpenAI) behind a provider-independent interface
+- **Supabase PostgreSQL + Auth** for persistent storage and server-verified identity
+- **PostgreSQL-backed rate limiting** with atomic counters and fail-closed behavior
+- **Secure environment configuration** with no secrets in code
+
+All existing Phase 9.4 functionality (conversation persistence, evidence grounding, action lifecycle, mock provider, response validation, typed action registry, frontend UI) is preserved and extended.
+
+---
+
+## 2. Exact Files to Create or Modify
+
+### 2.1 New Files — AI Provider Layer
+
+| File | Purpose |
+|------|---------|
+| `packages/ai/src/provider.ts` | **Modify** — Extend `AIProvider` interface with `metadata`, `countTokens`, `close` |
+| `packages/ai/src/anthropicProvider.ts` | **Create** — `AnthropicProvider` implementing `AIProvider` with structured output |
+| `packages/ai/src/openaiProvider.ts` | **Create** — `OpenAIProvider` implementing `AIProvider` (future-proofing) |
+| `packages/ai/src/providerFactory.ts` | **Create** — Runtime provider selection via `AI_PROVIDER` env var |
+| `packages/ai/src/tokenCounter.ts` | **Create** — Token counting utilities for cost tracking |
+| `packages/ai/src/structuredOutput.ts` | **Create** — JSON schema definitions for provider responses |
+| `packages/ai/src/__tests__/anthropicProvider.test.ts` | **Create** — Unit tests with mocked HTTP |
+| `packages/ai/src/__tests__/providerFactory.test.ts` | **Create** — Factory selection tests |
+
+### 2.2 New Files — Database & Auth Layer
+
+| File | Purpose |
+|------|---------|
+| `apps/api/src/auth/supabaseAuth.ts` | **Create** — Supabase JWT verification, user extraction middleware |
+| `apps/api/src/auth/middleware.ts` | **Create** — Express-style auth middleware for routes |
+| `apps/api/src/auth/rateLimiter.ts` | **Create** — PostgreSQL-backed rate limiter with atomic counters |
+| `apps/api/src/auth/rateLimitStore.ts` | **Create** — Rate limit store interface (PostgreSQL impl + Redis-ready) |
+| `apps/api/src/auth/__tests__/supabaseAuth.test.ts` | **Create** — Auth middleware tests |
+| `apps/api/src/auth/__tests__/rateLimiter.test.ts` | **Create** — Rate limiter integration tests |
+| `packages/db/prisma/migrations/20261112_add_supabase_auth/` | **Create** — Migration for Supabase auth integration (if needed) |
+
+### 2.3 Modified Files — Orchestration & Services
+
+| File | Changes |
+|------|---------|
+| `apps/api/src/services/aiCoaching/orchestrator.ts` | Inject provider factory, add token tracking, fail-closed on provider failure, remove mock-only logic |
+| `apps/api/src/services/aiCoaching/index.ts` | Export new provider factory, token counter |
+| `apps/api/src/services/aiCoaching/contextBuilder.ts` | No functional changes (verify ownership checks use authenticated userId) |
+| `apps/api/src/services/index.ts` | Export auth middleware, rate limiter |
+| `apps/api/src/routes.ts` | Apply auth middleware to all coaching routes, apply rate limiter, remove client-supplied userId trust |
+| `apps/api/src/http.ts` | Add middleware pipeline support |
+| `apps/api/src/validation.ts` | Add auth/rate-limit validation helpers |
+
+### 2.4 Modified Files — Frontend
+
+| File | Changes |
+|------|---------|
+| `apps/web/src/session/SessionContext.tsx` | Replace localStorage userId with Supabase auth session |
+| `apps/web/src/api/client.ts` | Add Authorization header from Supabase session |
+| `apps/web/src/screens/OnboardingScreen.tsx` | Integrate Supabase sign-up/sign-in flow |
+| `apps/web/src/__tests__/mockApi.ts` | Add auth header mocking for tests |
+
+### 2.5 Configuration Files
+
+| File | Changes |
+|------|---------|
+| `.env.example` | **Update** — Add all Phase 9.5 placeholders (see Section 4) |
+| `apps/api/package.json` | Add `@supabase/supabase-js`, `zod` (schema validation) |
+| `packages/ai/package.json` | Add `@anthropic-ai/sdk`, `openai` (optional), `zod` |
+| `packages/db/package.json` | Verify Prisma Supabase compatibility |
+
+---
+
+## 3. Existing Code to Reuse
+
+| Component | File | Reuse Strategy |
+|-----------|------|----------------|
+| `ConversationOrchestrator` | `orchestrator.ts` | Core logic preserved; inject provider factory instead of direct provider |
+| `PersonalContextBuilder` | `contextBuilder.ts` | Unchanged — evidence retrieval works with authenticated userId |
+| `ResponseValidator` | `responseValidator.ts` | Unchanged — mandatory validation layer |
+| `TypedActionRegistry` | `actionRegistry.ts` | Unchanged — consequential action gating |
+| `MockAIProvider` | `mockProvider.ts` | Retained for testing; implements same `AIProvider` interface |
+| `Conversation/Message models` | `schema.prisma` | Preserved; verify Supabase compatibility |
+| `Conversation repositories` | `conversation.ts` | Preserved; Prisma client works with Supabase |
+| `CoachScreen, CoachMessage, CoachAction, CoachEvidence, CoachDecision, CoachQualityBanner, CoachMockBadge, CoachInput, CoachConversationList, CoachEmpty` | Frontend components | Unchanged — UI already provider-independent |
+| `API client & types` | `client.ts`, `endpoints.ts`, `types.ts` | Minor auth header additions |
+| `Integration tests` | `aiCoaching.integration.ts` | Extended to run against real provider + Supabase |
+| `Frontend tests` | `CoachScreen*.test.tsx`, `CoachAction.test.tsx` | Extended with auth mocking |
+
+---
+
+## 4. Database Migration Strategy
+
+### 4.1 Current State
+- Prisma schema defines `Conversation` and `ConversationMessage` models (Phase 9.3 migration: `20261111120000_add_conversation_models`)
+- All domain tables exist (users, profiles, goals, workouts, measurements, nutrition, decisions, etc.)
+
+### 4.2 Supabase Integration Requirements
+| Requirement | Approach |
+|-------------|----------|
+| **User identity** | Supabase Auth `auth.users` table becomes source of truth; `public.users` table synced via trigger or application logic |
+| **Ownership** | All coaching routes use `auth.uid()` from verified JWT; remove `userId` from URL path |
+| **RLS** | Evaluate per-table; enable for `conversations`, `conversation_messages` with `auth.uid() = user_id` policies |
+| **Service role** | Server-side only; used for admin operations, migrations, background jobs |
+| **Connection pooling** | Use Supabase PgBouncer (port 6543) for runtime; direct connection (port 5432) for migrations |
+
+### 4.3 Migration Steps
+1. **Verify existing migration** — Apply `20261111120000_add_conversation_models` to Supabase
+2. **Add Supabase auth sync** — Create migration to add `supabase_user_id` to `users` table + trigger/function for sync
+3. **Enable RLS** — Add policies on `conversations`, `conversation_messages` (test thoroughly)
+4. **Update Prisma schema** — Map `users.supabase_user_id` to `auth.users.id`; adjust relations
+5. **Connection config** — Separate `DATABASE_URL` (direct, migrations) and `DATABASE_URL_POOLED` (runtime)
+
+### 4.4 Rollback
+- All migrations are additive (new columns, RLS policies)
+- RLS can be disabled with `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`
+- Supabase auth sync trigger can be dropped
+
+---
+
+## 5. Supabase Authentication Integration
+
+### 5.1 Architecture
+```
+Frontend (Supabase JS SDK)
+    ↓ signUp / signIn / signOut
+Supabase Auth (hosted)
+    ↓ returns JWT (access_token)
+Frontend stores session in memory + localStorage (Supabase handles refresh)
+    ↓ Authorization: Bearer <access_token>
+API Gateway (Node HTTP router)
+    ↓ supabaseAuth middleware
+JWT verified via Supabase JWKS
+    ↓ userId = JWT.sub (UUID)
+Request proceeds with authenticated userId
+```
+
+### 5.2 Server-Side Implementation
+```typescript
+// apps/api/src/auth/supabaseAuth.ts
+export async function verifySupabaseToken(token: string): Promise<{ userId: string; email: string } | null>
+export function authMiddleware(): Middleware  // extracts userId, attaches to request
+```
+
+### 5.3 Client-Side Implementation
+```typescript
+// apps/web/src/session/SupabaseSessionContext.tsx
+export function SupabaseSessionProvider({ children })  // wraps Supabase auth state
+export function useSupabaseAuth()  // returns { user, session, signIn, signUp, signOut }
+```
+
+### 5.4 Route Protection
+All coaching routes (`/v0/users/:userId/conversations*`) become `/v0/conversations*` with `userId` derived from JWT.
+
+---
+
+## 6. AI Provider Architecture
+
+### 6.1 Provider Interface (`packages/ai/src/provider.ts`)
+```typescript
+export interface AIProvider {
+  readonly metadata: ProviderMetadata;
+  generate(request: ProviderRequest): Promise<ProviderResponse>;
+  countTokens(text: string): Promise<number>;
+  close(): Promise<void>;
+}
+
+export interface ProviderMetadata {
+  name: string;           // "anthropic" | "openai" | "mock"
+  isMock: boolean;
+  model: string;
+  contractVersion: string;
+  maxTokens?: number;
+  supportsStructuredOutput: boolean;
+}
+```
+
+### 6.2 Structured Output Schema (`packages/ai/src/structuredOutput.ts`)
+```typescript
+// Zod schema for provider response validation
+export const ProviderResponseSchema = z.object({
+  answer: z.string(),
+  reasoningTrace: z.array(z.string()).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  proposedActions: z.array(ProposedActionSchema).optional(),
+  warnings: z.array(z.string()).optional(),
+  isMock: z.boolean(),
+  tokenUsage: z.object({
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+  }).optional(),
+});
+```
+
+### 6.3 Anthropic Provider (`packages/ai/src/anthropicProvider.ts`)
+- Uses `@anthropic-ai/sdk` with `tools` (function calling) for structured output
+- Implements `generate()` with system prompt + context + tool definitions
+- Maps tool calls → `ProposedAction[]`
+- Token counting via `countTokens()` (approximation or Anthropic's token counting API)
+- Timeouts: 30s connect, 120s response
+- Retries: 3 attempts with exponential backoff (idempotent only)
+- Fail-closed: throws on missing API key, never falls back silently
+
+### 6.4 Provider Factory (`packages/ai/src/providerFactory.ts`)
+```typescript
+export function createProvider(config: ProviderConfig): AIProvider
+export interface ProviderConfig {
+  provider: 'anthropic' | 'openai' | 'mock';
+  model: string;
+  apiKey?: string;  // required for non-mock
+  maxTokens?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+```
+- Reads from env: `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY`, `AI_MAX_TOKENS`, `AI_TIMEOUT_MS`, `AI_MAX_RETRIES`
+- Validates config at startup; throws if real provider selected without API key
+
+### 6.5 Orchestrator Integration
+```typescript
+// orchestrator.ts constructor
+constructor(deps: OrchestratorDependencies & { providerFactory: ProviderFactory })
+// processMessage()
+const provider = this.providerFactory.create(this.config.providerConfig);
+const response = await provider.generate(request);
+// Track token usage in CoachingResponse + audit log
+```
+
+### 6.6 Cost Controls
+| Control | Implementation |
+|---------|----------------|
+| Daily token budget | Rate limiter `ai_tokens_daily` counter per user |
+| Per-request token limit | `maxTokens` in provider config + request validation |
+| Model selection | Configurable via `AI_MODEL` env var |
+| Usage logging | Token usage persisted in `CoachingResponse` + audit trail |
+
+---
+
+## 7. Rate-Limit Implementation Design
+
+### 7.1 Store Interface (`apps/api/src/auth/rateLimitStore.ts`)
+```typescript
+export interface RateLimitStore {
+  increment(key: string, windowMs: number, limit: number): Promise<RateLimitResult>;
+  get(key: string): Promise<RateLimitResult | null>;
+  reset(key: string): Promise<void>;
+  cleanup(): Promise<void>;  // remove expired entries
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  current: number;
+  limit: number;
+  remaining: number;
+  resetAt: number;  // Unix ms
+  retryAfterMs?: number;
+}
+```
+
+### 7.2 PostgreSQL Implementation (`apps/api/src/auth/postgresRateLimitStore.ts`)
+```sql
+-- Migration: rate_limit_counters table
+CREATE TABLE rate_limit_counters (
+  key TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 1,
+  window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+  window_ms BIGINT NOT NULL,
+  limit INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_rate_limit_window ON rate_limit_counters (window_start);
+```
+
+Atomic increment via:
+```sql
+INSERT INTO rate_limit_counters (key, count, window_start, window_ms, limit)
+VALUES ($1, 1, now(), $2, $3)
+ON CONFLICT (key) DO UPDATE SET
+  count = rate_limit_counters.count + 1,
+  updated_at = now()
+WHERE rate_limit_counters.window_start > now() - rate_limit_counters.window_ms * interval '1 ms'
+RETURNING count, window_start;
+```
+
+### 7.3 Rate Limiter (`apps/api/src/auth/rateLimiter.ts`)
+```typescript
+export class RateLimiter {
+  constructor(
+    private store: RateLimitStore,
+    private policies: RateLimitPolicy[],
+    private failClosed: boolean = true  // for AI generation
+  ) {}
+  
+  async check(request: RateLimitRequest): Promise<RateLimitResult> {
+    // Match policy by route pattern + user/IP
+    // Increment counter
+    // Return 429 with Retry-After if exceeded
+  }
+}
+
+export interface RateLimitPolicy {
+  pattern: RegExp | string;  // route pattern
+  scope: 'user' | 'ip' | 'user+ip';
+  windowMs: number;
+  limit: number;
+  failClosed?: boolean;  // override for AI endpoints
+}
+```
+
+### 7.4 Initial Policies (Configurable via Env)
+| Endpoint Pattern | Scope | Window | Limit | Fail Closed |
+|-----------------|-------|--------|-------|-------------|
+| `/v0/conversations*` (POST messages) | user | 1 min | 10 | ✅ |
+| `/v0/conversations*` (POST messages) | user | 1 hour | 60 | ✅ |
+| `/v0/conversations` (POST create) | user | 1 min | 10 | ❌ |
+| `/v0/*` (all) | ip | 1 min | 120 | ❌ |
+| AI token budget | user | 24 hour | 100k tokens | ✅ |
+
+### 7.5 Duplicate Submission Protection
+- Client generates idempotency key per message (`clientRequestId`)
+- Rate limiter checks `idempotency:{key}` before incrementing AI counters
+- If key exists → return cached response, no AI generation charged
+
+### 7.6 Fail-Safe Behavior
+| Scenario | Behavior |
+|----------|----------|
+| DB unavailable | If `failClosed=true` → deny request (503); else allow (fail-open) |
+| Counter cleanup | Background job runs hourly; removes entries older than 2x max window |
+| Clock skew | Use DB `now()` for window boundaries |
+
+---
+
+## 8. Security Considerations
+
+### 8.1 Authentication
+- [ ] All coaching routes require valid Supabase JWT
+- [ ] `userId` derived from `JWT.sub` — never from URL params
+- [ ] JWT verified via Supabase JWKS (rotating keys)
+- [ ] Token expiry enforced (reject expired tokens)
+- [ ] Refresh handled client-side by Supabase SDK
+
+### 8.2 Authorization
+- [ ] Conversation ownership: `conversation.user_id = auth.uid()`
+- [ ] Message ownership: via conversation ownership
+- [ ] Action execution: `action.user_id = auth.uid()` (enforced in registry)
+- [ ] RLS policies on `conversations`, `conversation_messages`
+
+### 8.3 API Key Protection
+- [ ] `AI_API_KEY` only in server environment variables
+- [ ] Never logged, never sent to frontend
+- [ ] Rotated via Supabase/environment secret management
+- [ ] Different keys per environment (dev/staging/prod)
+
+### 8.4 Rate Limiting
+- [ ] User-based limits prevent abuse
+- [ ] IP-based limits prevent anonymous enumeration
+- [ ] AI token budgets prevent cost overruns
+- [ ] Fail-closed on AI endpoints when limiter unavailable
+
+### 8.5 Data Protection
+- [ ] Conversation content encrypted at rest (Supabase default)
+- [ ] PII in conversations: user messages may contain health data — consider field-level encryption
+- [ ] Audit trail immutable; no deletion of coaching turns
+
+---
+
+## 9. Implementation Dependencies
+
+```
+Phase 9.5A: Foundation (Week 1-2)
+├── 9.5A.1 Supabase project setup + Prisma migration verification
+├── 9.5A.2 Auth middleware + JWT verification
+├── 9.5A.3 Rate limiter store (PostgreSQL) + policies
+├── 9.5A.4 Apply auth + rate limiter to coaching routes
+├── 9.5A.4 Frontend Supabase session context
+├── 9.5A.5 Onboarding Supabase sign-up flow
+└── 9.5A.6 Integration tests against real Supabase
+
+Phase 9.5B: AI Provider (Week 2-4)
+├── 9.5B.1 Provider interface extension (tokens, close)
+├── 9.5B.2 Structured output schema (Zod)
+├── 9.5B.3 AnthropicProvider implementation
+├── 9.5B.4 Provider factory + config validation
+├── 9.5B.5 Orchestrator integration + token tracking
+├── 9.5B.6 Cost controls (daily token budget in rate limiter)
+└── 9.5B.7 Integration tests with real provider (mock API key)
+
+Phase 9.5C: Hardening (Week 4-5)
+├── 9.5C.1 Idempotency keys for message submission
+├── 9.5C.2 Audit trail persistence
+├── 9.5C.3 Structured logging + correlation IDs
+├── 9.5C.4 Health check endpoints
+├── 9.5C.5 Metrics exposure (Prometheus)
+├── 9.5C.6 Load testing + tuning
+└── 9.5C.7 Documentation updates
+```
+
+**Critical Path**: 9.5A → 9.5B → 9.5C (sequential)
+**Parallelizable**: Frontend auth (9.5A.5) can start after 9.5A.2; Rate limiter (9.5A.3) independent of auth
+
+---
+
+## 10. Estimated Time per Task
+
+| Task | Estimate | Notes |
+|------|----------|-------|
+| 9.5A.1 Supabase + migrations | 2 days | Verify existing migration applies cleanly |
+| 9.5A.2 Auth middleware | 1.5 days | JWT verification, JWKS caching |
+| 9.5A.3 Rate limiter store | 2 days | Atomic counters, cleanup job |
+| 9.5A.4 Route protection | 1 day | Apply middleware, remove userId from URLs |
+| 9.5A.5 Frontend auth | 2 days | SupabaseSessionContext, onboarding flow |
+| 9.5A.6 Integration tests | 1.5 days | Real Supabase, test containers |
+| **9.5A Total** | **10 days** | ~2 weeks |
+| 9.5B.1 Interface extension | 0.5 day | Add token counting, close |
+| 9.5B.2 Structured output schema | 1 day | Zod schemas, validation |
+| 9.5B.3 AnthropicProvider | 3 days | Function calling, token counting, retries |
+| 9.5B.4 Provider factory | 1 day | Config validation, startup checks |
+| 9.5B.5 Orchestrator integration | 1.5 days | Token tracking, fail-closed, audit |
+| 9.5B.6 Cost controls | 1 day | Daily token budget in rate limiter |
+| 9.5B.7 Real provider tests | 2 days | Mock Anthropic API, test scenarios |
+| **9.5B Total** | **10 days** | ~2 weeks |
+| 9.5C.1 Idempotency | 1 day | Client + server keys |
+| 9.5C.2 Audit trail | 1.5 days | Immutable log table |
+| 9.5C.3 Logging + health | 1 day | Structured JSON, correlation IDs |
+| 9.5C.4 Metrics | 1 day | Prometheus counters/histograms |
+| 9.5C.5 Load testing | 2 days | k6/artillery, tuning |
+| 9.5C.6 Documentation | 1 day | Architecture, runbooks |
+| **9.5C Total** | **7.5 days** | ~1.5 weeks |
+| **Grand Total** | **27.5 days** | **~5.5 weeks** |
+
+---
+
+## 11. Acceptance Criteria
+
+### 11.1 Phase 9.5A — Foundation
+- [ ] `npm run db:migrate` applies cleanly to Supabase PostgreSQL
+- [ ] All coaching routes return 401 without valid Supabase JWT
+- [ ] Valid JWT allows access; `userId` = `JWT.sub` (verified in tests)
+- [ ] Cross-user access returns 403 (ownership enforced)
+- [ ] Rate limiter returns 429 with `Retry-After` header when limits exceeded
+- [ ] AI message limits: 10/min, 60/hour per user (configurable)
+- [ ] General API limit: 120/min per IP
+- [ ] Frontend sign-up → onboarding → coach flow works end-to-end
+- [ ] No client-supplied `userId` in any coaching request
+- [ ] RLS policies active on `conversations`, `conversation_messages`
+- [ ] All existing Phase 9.4 tests pass with auth + rate limiter
+
+### 11.2 Phase 9.5B — AI Provider
+- [ ] `AI_PROVIDER=anthropic` starts AnthropicProvider; `mock` starts MockAIProvider
+- [ ] Startup fails with clear error if `AI_PROVIDER=anthropic` but `AI_API_KEY` missing
+- [ ] Structured output: `answer`, `proposedActions[]`, `reasoningTrace[]`, `confidence`, `tokenUsage`
+- [ ] Function calling maps to action registry allowlist (7 actions)
+- [ ] ResponseValidator still runs and catches hallucinations/contradictions
+- [ ] Token usage tracked per request; persisted in response + audit log
+- [ ] Daily token budget enforced via rate limiter (100k tokens/user/day default)
+- [ ] Timeouts: 30s connect, 120s response; retries: 3x exponential backoff
+- [ ] Fail-closed: provider error → 502/503, never silent mock fallback
+- [ ] All 12 integration scenarios pass with real provider (mocked HTTP in CI)
+
+### 11.3 Phase 9.5C — Hardening
+- [ ] Duplicate message submission (same idempotency key) returns cached response
+- [ ] Audit trail: every coaching turn logged with userId, conversationId, evidenceRefs, actions, execution results
+- [ ] Structured JSON logs with correlation IDs; request/response sanitized
+- [ ] `/health` endpoint returns `{ status, database, aiProvider, version }`
+- [ ] Prometheus metrics: `coaching_turns_total`, `coaching_latency_seconds`, `provider_tokens_total`, `rate_limit_exceeded_total`
+- [ ] Load test: 100 concurrent users, p95 < 2s per turn, 0% error rate
+- [ ] No secrets in logs, code, tests, or Git history
+
+---
+
+## 12. Test Requirements
+
+### 12.1 Unit Tests
+| Component | Tests |
+|-----------|-------|
+| `AnthropicProvider` | Structured output parsing, tool call mapping, token counting, retry logic, timeout handling, missing API key error |
+| `ProviderFactory` | Config validation, provider selection, startup failure modes |
+| `PostgresRateLimitStore` | Atomic increment, window expiry, cleanup, concurrent increments |
+| `RateLimiter` | Policy matching, scope resolution, fail-closed/open, idempotency |
+| `SupabaseAuth` | JWT verification, JWKS caching, expired token rejection |
+
+### 12.2 Integration Tests
+| Scenario | Description |
+|----------|-------------|
+| Auth + coaching flow | Sign up → create conversation → send message → receive AI response |
+| Rate limit enforcement | Exceed 10/min → 429 with Retry-After; wait → succeeds |
+| Cross-user isolation | User A cannot access User B's conversations |
+| AI token budget | Exceed daily token limit → 429 on AI endpoints only |
+| Idempotency | Duplicate message with same key → cached response, no double charge |
+| Provider failure | Anthropic 500 → 502 to client; no mock fallback |
+| RLS enforcement | Direct DB query without auth returns 0 rows |
+
+### 12.3 End-to-End Tests (Playwright)
+| Flow | Steps |
+|------|-------|
+| New user onboarding | Visit app → sign up → complete onboarding → land on Home |
+| Coach conversation | Navigate to Coach → new conversation → ask question → see evidence → propose action → confirm → see result |
+| Rate limit UI | Send 11 messages rapidly → see 429 toast with retry countdown |
+| Session persistence | Refresh page → conversation list preserved → continue conversation |
+
+---
+
+## 13. Rollback Strategy
+
+### 13.1 Database
+| Risk | Rollback |
+|------|----------|
+| Migration fails | `prisma migrate resolve --rolled-back <migration_name>` |
+| RLS breaks queries | `ALTER TABLE conversations DISABLE ROW LEVEL SECURITY;` |
+| Supabase auth sync broken | Drop trigger/function; revert to `userId` from URL (temp) |
+
+### 13.2 AI Provider
+| Risk | Rollback |
+|------|----------|
+| AnthropicProvider bugs | Set `AI_PROVIDER=mock` in env; immediate fallback |
+| Token counting wrong | Disable token budget in rate limiter (`AI_TOKEN_BUDGET_ENABLED=false`) |
+| Structured output parsing fails | Extend validator to handle malformed responses gracefully |
+
+### 13.3 Rate Limiter
+| Risk | Rollback |
+|------|----------|
+| DB unavailable → fail-closed blocks all | Set `RATE_LIMIT_FAIL_CLOSED=false` (fail-open) |
+| Counter cleanup removes active | Increase cleanup interval; manual `DELETE` if needed |
+| Wrong limits | Update env vars; no code deploy needed |
+
+### 13.4 Frontend Auth
+| Risk | Rollback |
+|------|----------|
+| Supabase SDK breaks | Revert to `SessionContext` with localStorage `userId` (Phase 9.4 behavior) |
+
+---
+
+## 14. Decisions Requiring Confirmation
+
+| # | Decision | Options | Recommendation |
+|---|----------|---------|----------------|
+| 1 | **Supabase Auth Sync** | A) Application-level sync on sign-up<br>B) Database trigger on `auth.users` insert | **A** — simpler, explicit, testable |
+| 2 | **RLS Scope** | A) Enable on `conversations`, `messages` only<br>B) Enable on all user-data tables | **A** — start minimal; expand after verification |
+| 3 | **Connection Pooling** | A) PgBouncer (port 6543) for all runtime<br>B) Direct (5432) for migrations, pooled for runtime | **B** — standard Supabase pattern |
+| 4 | **AI Provider Default** | A) Default to mock (`AI_PROVIDER=mock`)<br>B) Require explicit env var (fail startup if unset) | **B** — explicit configuration |
+| 5 | **Token Counting** | A) Anthropic's token counting API (extra request)<br>B) Local approximation (tiktoken)<br>C) Skip for now, estimate from response | **B** — local, fast, accurate enough for budgets |
+| 6 | **Idempotency Key Storage** | A) In `conversation_messages` table<br>B) Separate `idempotency_keys` table with TTL | **B** — cleaner separation, automatic expiry |
+| 7 | **Audit Trail Retention** | A) 90 days<br>B) 1 year<br>C) Indefinite (archive to cold storage) | **A** — start with 90 days, configurable |
+| 8 | **Rate Limit Config Format** | A) JSON in env var<br>B) TypeScript config file (compiled)<br>C) Database table (admin UI later) | **A** — simple, deploy-time configurable |
+| 9 | **Frontend Session Storage** | A) Supabase SDK handles (localStorage + memory)<br>B) Custom secure storage | **A** — use SDK defaults |
+| 10 | **Provider Fallback Order** | A) Anthropic → OpenAI → Mock<br>B) Anthropic → Mock only<br>C) Configurable chain | **B** — simpler; OpenAI added later if needed |
+
+---
+
+## 15. Appendix: Updated `.env.example` Placeholders
+
+```bash
+# ---------------------------------------------------------------------------
+# Supabase (Phase 9.5)
+# ---------------------------------------------------------------------------
+# Supabase project URL (e.g., https://xxxxx.supabase.co)
+SUPABASE_URL=
+
+# Supabase anon key (client-safe, used by frontend)
+SUPABASE_ANON_KEY=
+
+# Supabase service role key (SERVER ONLY - never expose to frontend)
+SUPABASE_SERVICE_ROLE_KEY=
+
+# PostgreSQL connections
+# Direct connection (for migrations, seed, admin)
+DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
+
+# Pooled connection (for runtime via PgBouncer)
+DATABASE_URL_POOLED="postgresql://postgres:password@db.xxxxx.supabase.co:6543/postgres?pgbouncer=true"
+
+# ---------------------------------------------------------------------------
+# AI Provider (Phase 9.5)
+# ---------------------------------------------------------------------------
+# Provider: "anthropic" | "openai" | "mock"
+AI_PROVIDER=mock
+
+# Model identifier (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
+AI_MODEL=
+
+# API key for real provider (REQUIRED when AI_PROVIDER != "mock")
+# NEVER commit real keys. Use environment secret management.
+AI_API_KEY=
+
+# Optional provider tuning
+AI_MAX_TOKENS=4096
+AI_TIMEOUT_MS=120000
+AI_MAX_RETRIES=3
+
+# ---------------------------------------------------------------------------
+# Rate Limiting (Phase 9.5)
+# ---------------------------------------------------------------------------
+# Enable rate limiting (set to "false" to disable entirely)
+RATE_LIMIT_ENABLED=true
+
+# Fail closed when rate limiter store unavailable (AI endpoints)
+RATE_LIMIT_FAIL_CLOSED=true
+
+# Per-user coaching message limits
+RATE_LIMIT_COACHING_PER_MINUTE=10
+RATE_LIMIT_COACHING_PER_HOUR=60
+
+# Per-user conversation creation limit
+RATE_LIMIT_CONVERSATION_CREATE_PER_MINUTE=10
+
+# Per-IP general API limit
+RATE_LIMIT_GENERAL_PER_MINUTE=120
+
+# Daily AI token budget per user (approximate)
+RATE_LIMIT_AI_TOKENS_DAILY=100000
+
+# ---------------------------------------------------------------------------
+# Feature Flags (Phase 9.5)
+# ---------------------------------------------------------------------------
+# Enable daily AI token budget enforcement
+AI_TOKEN_BUDGET_ENABLED=true
+
+# Enable idempotency key deduplication
+IDEMPOTENCY_ENABLED=true
+
+# Enable audit trail persistence
+AUDIT_TRAIL_ENABLED=true
+```
+
+---
+
+**Plan Status**: Ready for review and approval. No implementation started.
+**Next Step**: Owner reviews, confirms decisions in Section 14, approves implementation.

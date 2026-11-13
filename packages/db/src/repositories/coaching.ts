@@ -649,6 +649,8 @@ export interface InterventionRepository {
   recordOutcome(input: RecordOutcomeInput): Promise<InterventionOutcomeRecord>;
   findById(id: InterventionId): Promise<InterventionRecord | null>;
   list(userId: string, options?: { status?: InterventionStatus; limit?: number }): Promise<InterventionRecord[]>;
+  /** Get active (non-completed, non-superseded) interventions for a user. */
+  listActive(userId: string): Promise<InterventionRecord[]>;
   outcomes(interventionId: InterventionId): Promise<InterventionOutcomeRecord[]>;
 }
 
@@ -797,6 +799,19 @@ export class PrismaInterventionRepository implements InterventionRepository {
         where: { userId, ...(options.status ? { status: options.status } : {}) },
         orderBy: { createdAt: "desc" },
         take: boundedLimit(options.limit, 50),
+      });
+      return rows.map(interventionRowToRecord);
+    });
+  }
+
+  async listActive(userId: string): Promise<InterventionRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.intervention.findMany({
+        where: {
+          userId,
+          status: { notIn: ["completed", "superseded", "declined"] },
+        },
+        orderBy: { createdAt: "desc" },
       });
       return rows.map(interventionRowToRecord);
     });

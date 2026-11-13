@@ -39,6 +39,9 @@ export type MealId = EntityId;
 export type DiagnosisId = EntityId;
 export type InterventionId = EntityId;
 export type RecommendationId = EntityId;
+export type DecisionSnapshotId = EntityId;
+export type DecisionEvidenceId = EntityId;
+export type UnifiedStateId = EntityId;
 
 /** Full ISO-8601 timestamp, e.g. "2026-08-25T07:30:00Z". */
 export type Timestamp = string;

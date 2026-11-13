@@ -53,8 +53,30 @@ export interface AddEquipmentCommand {
 export class UserService {
   constructor(private readonly users: UserRepository) {}
 
-  create(command: CreateUserCommand): Promise<User> {
-    return this.users.create(command);
+  /**
+   * Create a new user, or return the existing user if one with the same
+   * email already exists (idempotent by email). This handles the case where
+   * a user clears local storage and restarts onboarding with the same email.
+   */
+  async create(command: CreateUserCommand): Promise<{ user: User; created: boolean }> {
+    // If email is provided, check for an existing user first.
+    if (command.email !== undefined && command.email !== null && command.email.trim() !== "") {
+      const existing = await this.users.findByEmail(command.email.trim());
+      if (existing) {
+        // User exists — optionally update displayName/timezone if provided.
+        const patch: { email?: string; displayName?: string; timezone?: string } = {};
+        if (command.displayName !== undefined) patch.displayName = command.displayName;
+        if (command.timezone !== undefined) patch.timezone = command.timezone;
+        if (Object.keys(patch).length > 0) {
+          const updated = await this.users.update(existing.id, patch);
+          return { user: updated, created: false };
+        }
+        return { user: existing, created: false };
+      }
+    }
+    // No existing user with this email (or no email provided) — create new.
+    const user = await this.users.create(command);
+    return { user, created: true };
   }
 
   async get(userId: string): Promise<User> {
@@ -150,5 +172,10 @@ export class EquipmentService {
 
   addCatalogItem(input: { id?: string; slug: string; name: string; category: EquipmentCategory }) {
     return this.equipment.upsertCatalogItem(input);
+  }
+
+  /** The full equipment catalog (Phase 2 knowledge), for client pickers. */
+  catalog() {
+    return this.equipment.listCatalog();
   }
 }

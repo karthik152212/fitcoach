@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import type {
   CalendarDate,
   ConfidenceLevel,
+  EntityId,
   FoodId,
   FoodSourceKind,
   MealId,
@@ -13,6 +14,7 @@ import type {
 import { ConstraintValidationError, NotFoundError } from "../errors";
 import { newUuidv7 } from "../ids";
 import {
+  decimalToNumberOr0,
   foodNutrientsFromRow,
   foodNutrientsToColumns,
   itemSnapshotColumns,
@@ -196,12 +198,44 @@ export interface FoodRepository {
   findOrCreateUserSource(ownerUserId: string): Promise<FoodSourceRecord>;
   createFood(input: CreateFoodInput): Promise<FoodRecord>;
   findById(id: FoodId): Promise<FoodRecord | null>;
+  /** Find a food by barcode (EAN/UPC) */
+  findByBarcode(barcode: string): Promise<FoodRecord | null>;
+  /**
+   * Search foods by name, brand, or external ID with pagination.
+   * Results ranked: exact name match > partial name match > brand match > external ID match.
+   */
+  searchFoods(
+    query: string,
+    options?: { limit?: number; offset?: number; sourceId?: string }
+  ): Promise<{ foods: FoodRecord[]; total: number }>;
   /**
    * Update nutrient density (design S1: food rows are current-state; logged
    * history is protected by write-time snapshots and never changes).
    */
   updateNutrients(id: FoodId, nutrients: NutrientAmounts): Promise<FoodRecord>;
   deactivate(id: FoodId): Promise<void>;
+}
+
+/** Rank function for food search: lower = better match. */
+function computeFoodSearchRank(name: string, brand: string | null, query: string): number {
+  const q = query.toLowerCase();
+  const n = name.toLowerCase();
+  const b = brand?.toLowerCase() ?? "";
+
+  // Exact name match (case-insensitive)
+  if (n === q) return 0;
+  // Name starts with query
+  if (n.startsWith(q)) return 1;
+  // Name contains query
+  if (n.includes(q)) return 2;
+  // Brand exact match
+  if (b && b === q) return 3;
+  // Brand starts with query
+  if (b && b.startsWith(q)) return 4;
+  // Brand contains query
+  if (b && b.includes(q)) return 5;
+  // External ID match (handled by Prisma OR clause, but rank lower)
+  return 6;
 }
 
 export class PrismaFoodRepository implements FoodRepository {
@@ -326,6 +360,68 @@ export class PrismaFoodRepository implements FoodRepository {
   async deactivate(id: FoodId): Promise<void> {
     await runDb(async () => {
       await this.prisma.food.update({ where: { id }, data: { isActive: false } });
+    });
+  }
+
+  async findByBarcode(barcode: string): Promise<FoodRecord | null> {
+    return runDb(async () => {
+      const row = await this.prisma.food.findFirst({
+        where: { barcode, isActive: true },
+        include: FOOD_INCLUDE,
+      });
+      return row ? foodRowToRecord(row as FoodWithServings) : null;
+    });
+  }
+
+  async searchFoods(
+    query: string,
+    options?: { limit?: number; offset?: number; sourceId?: string }
+  ): Promise<{ foods: FoodRecord[]; total: number }> {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return { foods: [], total: 0 };
+    }
+
+    const limit = Math.min(options?.limit ?? 20, 100);
+    const offset = options?.offset ?? 0;
+    const sourceId = options?.sourceId;
+
+    return runDb(async () => {
+      // Build where clause for case-insensitive partial matching on name, brand, externalId
+      const where: Prisma.FoodWhereInput = {
+        isActive: true,
+        ...(sourceId ? { sourceId } : {}),
+        OR: [
+          { name: { contains: trimmed, mode: "insensitive" } },
+          { brand: { contains: trimmed, mode: "insensitive" } },
+          { externalId: { contains: trimmed, mode: "insensitive" } },
+        ],
+      };
+
+      // Get total count for pagination
+      const total = await this.prisma.food.count({ where });
+
+      // Fetch foods with servings
+      const rows = await this.prisma.food.findMany({
+        where,
+        include: FOOD_INCLUDE,
+        orderBy: { name: "asc" },
+        take: limit,
+        skip: offset,
+      });
+
+      // Rank results in application layer: exact name match > starts with > contains
+      const ranked = rows.map((row) => ({
+        record: foodRowToRecord(row as FoodWithServings),
+        rank: computeFoodSearchRank(row.name, row.brand, trimmed),
+      }));
+
+      ranked.sort((a, b) => a.rank - b.rank);
+
+      return {
+        foods: ranked.map((r) => r.record),
+        total,
+      };
     });
   }
 }
@@ -694,10 +790,23 @@ export interface UpsertDailyNutritionInput {
   targetsSnapshot?: Record<string, unknown>;
 }
 
+export interface NutritionStateSnapshot {
+  recentDailyTotals: DailyNutritionRecord[];
+  averageCalories: number;
+  averageProteinGrams: number;
+  averageCarbsGrams: number;
+  averageFatGrams: number;
+  adherencePercent: number;
+  daysWithData: number;
+  windowDays: number;
+}
+
 export interface NutritionRepository {
   /** Upsert the per-user-day aggregate (UNIQUE user_id + local_date). */
   upsertDaily(input: UpsertDailyNutritionInput): Promise<DailyNutritionRecord>;
   getDaily(userId: string, localDate: CalendarDate): Promise<DailyNutritionRecord | null>;
+  /** Get a state snapshot for unified decision brain (recent window aggregate). */
+  getStateSnapshot(userId: string, asOf: CalendarDate, windowDays?: number): Promise<NutritionStateSnapshot | null>;
 }
 
 export class PrismaNutritionRepository implements NutritionRepository {
@@ -733,6 +842,206 @@ export class PrismaNutritionRepository implements NutritionRepository {
         where: { userId_localDate: { userId: userId, localDate: day } },
       });
       return row ? dailyRowToRecord(row) : null;
+    });
+  }
+
+  async getStateSnapshot(
+    userId: string,
+    asOf: CalendarDate,
+    windowDays: number = 14,
+  ): Promise<NutritionStateSnapshot | null> {
+    const endDate = parseDay(asOf, "asOf");
+    const startDate = new Date(endDate.getTime() - windowDays * 86400000);
+
+    return runDb(async () => {
+      const rows = await this.prisma.dailyNutrition.findMany({
+        where: {
+          userId,
+          localDate: { gte: startDate, lte: endDate },
+        },
+        orderBy: { localDate: "asc" },
+      });
+
+      if (rows.length === 0) return null;
+
+      const records = rows.map(dailyRowToRecord);
+
+      // Calculate adherence: days meeting calorie target within ±10%
+      let adherentDays = 0;
+      for (const record of records) {
+        if (record.targetsSnapshot && typeof record.targetsSnapshot === "object") {
+          const target = record.targetsSnapshot as { caloriesKcal?: number };
+          if (target.caloriesKcal && target.caloriesKcal > 0) {
+            const diff = Math.abs(record.totals.caloriesKcal - target.caloriesKcal);
+            if (diff / target.caloriesKcal <= 0.1) adherentDays++;
+          }
+        }
+      }
+
+      const avgCalories = records.reduce((sum, r) => sum + r.totals.caloriesKcal, 0) / records.length;
+      const avgProtein = records.reduce((sum, r) => sum + (r.totals.proteinGrams ?? 0), 0) / records.length;
+      const avgCarbs = records.reduce((sum, r) => sum + (r.totals.carbohydrateGrams ?? 0), 0) / records.length;
+      const avgFat = records.reduce((sum, r) => sum + (r.totals.fatGrams ?? 0), 0) / records.length;
+
+      return {
+        recentDailyTotals: records,
+        averageCalories: avgCalories,
+        averageProteinGrams: avgProtein,
+        averageCarbsGrams: avgCarbs,
+        averageFatGrams: avgFat,
+        adherencePercent: records.length > 0 ? (adherentDays / records.length) * 100 : 0,
+        daysWithData: records.length,
+        windowDays,
+      };
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Recipes (reference data; retired, never silently rewritten)
+// ---------------------------------------------------------------------------
+
+interface RecipeItemRow {
+  id: string;
+  recipeId: string;
+  foodId: string;
+  quantityGrams: unknown;
+  position: number;
+  notes: string | null;
+}
+
+export interface RecipeItemRecord {
+  id: EntityId;
+  recipeId: RecipeId;
+  foodId: FoodId;
+  quantityGrams: number;
+  position: number;
+  notes?: string;
+}
+
+interface RecipeRow {
+  id: string;
+  ownerUserId: string | null;
+  name: string;
+  servings: number;
+  instructions: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RecipeRecord {
+  id: RecipeId;
+  ownerUserId?: string;
+  name: string;
+  servings: number;
+  instructions?: string;
+  items: RecipeItemRecord[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+function recipeItemRowToRecord(row: RecipeItemRow): RecipeItemRecord {
+  return {
+    id: row.id,
+    recipeId: row.recipeId,
+    foodId: row.foodId,
+    quantityGrams: decimalToNumberOr0(row.quantityGrams),
+    position: row.position,
+    notes: row.notes ?? undefined,
+  };
+}
+
+function recipeRowToRecord(row: RecipeRow, items: RecipeItemRecord[]): RecipeRecord {
+  return {
+    id: row.id,
+    ownerUserId: row.ownerUserId ?? undefined,
+    name: row.name,
+    servings: row.servings,
+    instructions: row.instructions ?? undefined,
+    items,
+    createdAt: toTimestamp(row.createdAt),
+    updatedAt: toTimestamp(row.updatedAt),
+  };
+}
+
+const RECIPE_INCLUDE = { items: { orderBy: { position: "asc" as const } } } as const;
+
+export interface CreateRecipeInput {
+  id?: string;
+  ownerUserId?: string;
+  name: string;
+  servings: number;
+  instructions?: string;
+  items: readonly {
+    foodId: FoodId;
+    quantityGrams: number;
+    notes?: string;
+  }[];
+}
+
+export interface RecipeRepository {
+  create(input: CreateRecipeInput): Promise<RecipeRecord>;
+  findById(id: RecipeId): Promise<RecipeRecord | null>;
+  listByOwner(ownerUserId: string): Promise<RecipeRecord[]>;
+  deactivate(id: RecipeId): Promise<void>;
+}
+
+export class PrismaRecipeRepository implements RecipeRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async create(input: CreateRecipeInput): Promise<RecipeRecord> {
+    const id = input.id ?? newUuidv7();
+    return runDb(async () => {
+      return this.prisma.$transaction(async (tx) => {
+        const row = await tx.recipe.create({
+          data: {
+            id,
+            ownerUserId: input.ownerUserId ?? null,
+            name: input.name,
+            servings: input.servings,
+            instructions: input.instructions ?? null,
+            items: {
+              create: input.items.map((item, index) => ({
+                id: newUuidv7(),
+                recipeId: id,
+                foodId: item.foodId,
+                quantityGrams: item.quantityGrams,
+                position: index,
+                notes: item.notes ?? null,
+              })),
+            },
+          },
+          include: RECIPE_INCLUDE,
+        });
+        return recipeRowToRecord(row, row.items.map(recipeItemRowToRecord));
+      });
+    });
+  }
+
+  async findById(id: RecipeId): Promise<RecipeRecord | null> {
+    return runDb(async () => {
+      const row = await this.prisma.recipe.findUnique({
+        where: { id },
+        include: RECIPE_INCLUDE,
+      });
+      return row ? recipeRowToRecord(row, row.items.map(recipeItemRowToRecord)) : null;
+    });
+  }
+
+  async listByOwner(ownerUserId: string): Promise<RecipeRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.recipe.findMany({
+        where: { ownerUserId },
+        include: RECIPE_INCLUDE,
+        orderBy: { createdAt: "desc" },
+      });
+      return rows.map((row) => recipeRowToRecord(row, row.items.map(recipeItemRowToRecord)));
+    });
+  }
+
+  async deactivate(id: RecipeId): Promise<void> {
+    await runDb(async () => {
+      await this.prisma.recipe.update({ where: { id }, data: { ownerUserId: null } });
     });
   }
 }

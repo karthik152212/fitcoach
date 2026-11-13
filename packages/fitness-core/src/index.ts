@@ -27,3 +27,8 @@ export * from "./planQuality";
 export * from "./performanceLedger";
 export * from "./trainingEnvironment";
 export * from "./trendDetection";
+export * from "./activity";
+export * from "./recovery";
+export * from "./body";
+export * from "./projection";
+export * from "./unifiedDecision";

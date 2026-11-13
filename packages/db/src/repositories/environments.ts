@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import type {
   CalendarDate,
   TrainingEnvironmentKind,
@@ -69,28 +70,25 @@ interface EnvironmentRow {
   id: string;
   userId: string;
   kind: string;
-  availableEquipmentIds: string[];
-  unavailableEquipmentIds: string[];
-  effectiveFrom: Date;
-  effectiveTo: Date | null;
-  reason: string | null;
-  isTemporary: boolean;
-  notes: string | null;
+  config: Prisma.JsonValue;
+  validFrom: Date;
+  validTo: Date | null;
   createdAt: Date;
 }
 
 function rowToRecord(row: EnvironmentRow): TrainingEnvironmentPeriod {
+  const config = (row.config ?? {}) as Record<string, unknown>;
   return {
     id: row.id,
     userId: row.userId,
     kind: row.kind as TrainingEnvironmentKind,
-    availableEquipmentIds: [...row.availableEquipmentIds].sort(),
-    unavailableEquipmentIds: [...row.unavailableEquipmentIds].sort(),
-    effectiveFrom: toCalendarDate(row.effectiveFrom),
-    ...(row.effectiveTo ? { effectiveTo: toCalendarDate(row.effectiveTo) } : {}),
-    ...(row.reason ? { reason: row.reason } : {}),
-    isTemporary: row.isTemporary,
-    ...(row.notes ? { notes: row.notes } : {}),
+    availableEquipmentIds: ((config.availableEquipmentIds as string[]) ?? []).sort(),
+    unavailableEquipmentIds: ((config.unavailableEquipmentIds as string[]) ?? []).sort(),
+    effectiveFrom: toCalendarDate(row.validFrom),
+    ...(row.validTo ? { effectiveTo: toCalendarDate(row.validTo) } : {}),
+    ...(config.reason ? { reason: config.reason as string } : {}),
+    isTemporary: (config.isTemporary as boolean) ?? true,
+    ...(config.notes ? { notes: config.notes as string } : {}),
     createdAt: toTimestamp(row.createdAt),
   };
 }
@@ -102,11 +100,11 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
     if (!ENVIRONMENT_KINDS.includes(input.kind)) {
       throw new ConstraintValidationError(`unknown training environment kind ${input.kind}`);
     }
-    const effectiveFrom = parseDate(input.effectiveFrom, "effectiveFrom");
-    const effectiveTo = input.effectiveTo
+    const validFrom = parseDate(input.effectiveFrom, "effectiveFrom");
+    const validTo = input.effectiveTo
       ? parseDate(input.effectiveTo, "effectiveTo")
       : null;
-    if (effectiveTo && effectiveTo.getTime() <= effectiveFrom.getTime()) {
+    if (validTo && validTo.getTime() <= validFrom.getTime()) {
       throw new ConstraintValidationError("effectiveTo must be after effectiveFrom");
     }
 
@@ -117,33 +115,37 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
 
         // Close the open row instead of editing it: the interval is the history.
         const open = await tx.trainingEnvironmentPeriod.findFirst({
-          where: { userId: input.userId, effectiveTo: null },
-          orderBy: { effectiveFrom: "desc" },
+          where: { userId: input.userId, validTo: null },
+          orderBy: { validFrom: "desc" },
         });
-        if (open && open.effectiveFrom.getTime() >= effectiveFrom.getTime()) {
+        if (open && open.validFrom.getTime() >= validFrom.getTime()) {
           throw new ConstraintValidationError(
             "a new environment must start after the currently open environment's start",
           );
         }
         if (open) {
           await tx.trainingEnvironmentPeriod.updateMany({
-            where: { id: open.id, effectiveTo: null },
-            data: { effectiveTo: effectiveFrom },
+            where: { id: open.id, validTo: null },
+            data: { validTo: validFrom },
           });
         }
+
+        const config = {
+          availableEquipmentIds: [...new Set(input.availableEquipmentIds ?? [])].sort(),
+          unavailableEquipmentIds: [...new Set(input.unavailableEquipmentIds ?? [])].sort(),
+          reason: input.reason ?? null,
+          isTemporary: input.isTemporary ?? true,
+          notes: input.notes ?? null,
+        };
 
         const row = await tx.trainingEnvironmentPeriod.create({
           data: {
             id: input.id ?? newUuidv7(),
             userId: input.userId,
             kind: input.kind,
-            availableEquipmentIds: [...new Set(input.availableEquipmentIds ?? [])].sort(),
-            unavailableEquipmentIds: [...new Set(input.unavailableEquipmentIds ?? [])].sort(),
-            effectiveFrom,
-            effectiveTo,
-            reason: input.reason ?? null,
-            isTemporary: input.isTemporary ?? true,
-            notes: input.notes ?? null,
+            config: config as Prisma.InputJsonValue,
+            validFrom,
+            validTo,
           },
         });
         return rowToRecord(row);
@@ -155,7 +157,7 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
     return runDb(async () => {
       const rows = await this.prisma.trainingEnvironmentPeriod.findMany({
         where: { userId },
-        orderBy: [{ effectiveFrom: "desc" }, { id: "asc" }],
+        orderBy: [{ validFrom: "desc" }, { id: "asc" }],
       });
       return rows.map(rowToRecord);
     });
@@ -170,10 +172,10 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
       const row = await this.prisma.trainingEnvironmentPeriod.findFirst({
         where: {
           userId,
-          effectiveFrom: { lte: at },
-          OR: [{ effectiveTo: null }, { effectiveTo: { gt: at } }],
+          validFrom: { lte: at },
+          OR: [{ validTo: null }, { validTo: { gt: at } }],
         },
-        orderBy: [{ effectiveFrom: "desc" }, { id: "asc" }],
+        orderBy: [{ validFrom: "desc" }, { id: "asc" }],
       });
       return row ? rowToRecord(row) : null;
     });
@@ -185,12 +187,12 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
       this.prisma.$transaction(async (tx) => {
         const existing = await tx.trainingEnvironmentPeriod.findUnique({ where: { id: periodId } });
         if (!existing) throw new NotFoundError(`training environment period ${periodId} not found`);
-        if (end.getTime() <= existing.effectiveFrom.getTime()) {
+        if (end.getTime() <= existing.validFrom.getTime()) {
           throw new ConstraintValidationError("effectiveTo must be after effectiveFrom");
         }
         const row = await tx.trainingEnvironmentPeriod.update({
           where: { id: periodId },
-          data: { effectiveTo: end },
+          data: { validTo: end },
         });
         return rowToRecord(row);
       }),
@@ -205,18 +207,18 @@ export class PrismaTrainingEnvironmentRepository implements TrainingEnvironmentR
     return runDb(async () =>
       this.prisma.$transaction(async (tx) => {
         const open = await tx.trainingEnvironmentPeriod.findFirst({
-          where: { userId, effectiveTo: null },
-          orderBy: { effectiveFrom: "desc" },
+          where: { userId, validTo: null },
+          orderBy: { validFrom: "desc" },
         });
         if (!open) return null;
-        if (end.getTime() <= open.effectiveFrom.getTime()) {
+        if (end.getTime() <= open.validFrom.getTime()) {
           // A same-or-earlier end is a no-op window rather than a zero-length
           // interval; leaving the row open is the honest outcome.
           return rowToRecord(open);
         }
         const row = await tx.trainingEnvironmentPeriod.update({
           where: { id: open.id },
-          data: { effectiveTo: end },
+          data: { validTo: end },
         });
         return rowToRecord(row);
       }),

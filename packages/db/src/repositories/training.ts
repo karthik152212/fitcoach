@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import type {
   CalendarDate,
   ExerciseSlot,
@@ -17,7 +17,7 @@ import { decimalToNumber, toCalendarDate, toTimestamp } from "../mapping";
 import { boundedLimit, runDb } from "./util";
 
 // ---------------------------------------------------------------------------
-// Plan records
+// Plan records — match Prisma schema
 // ---------------------------------------------------------------------------
 
 interface PlanRow {
@@ -25,11 +25,9 @@ interface PlanRow {
   userId: string;
   name: string;
   status: string;
-  notes: string | null;
-  kind: string;
-  environmentKind: string | null;
-  effectiveUntil: Date | null;
-  temporaryForVersionId: string | null;
+  description: string | null;
+  activeFrom: Date | null;
+  activeUntil: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -37,54 +35,57 @@ interface PlanRow {
 interface PlanVersionRow {
   id: string;
   planId: string;
-  versionNumber: number;
-  startsOn: Date;
-  endsOn: Date | null;
-  rationaleNotes: string | null;
-  lifecycleStatus: string;
-  generationReason: string | null;
-  parentVersionId: string | null;
-  supersededAt: Date | null;
+  status: string;
+  planJson: string;
   configVersion: string | null;
+  supersedesId: string | null;
+  effectiveFrom: Date;
+  effectiveUntil: Date | null;
   createdAt: Date;
+  updatedAt: Date;
 }
 
 interface PlanSessionRow {
   id: string;
   versionId: string;
-  name: string;
-  weekdayHint: number | null;
-  position: number;
+  dayOfWeek: number;
+  name: string | null;
+  notes: string | null;
+  estimatedDurationMinutes: number | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface PlanSlotRow {
   id: string;
   sessionId: string;
   exerciseId: string;
-  targetSets: number | null;
-  repMin: number | null;
-  repMax: number | null;
-  targetRir: unknown;
-  restSeconds: number | null;
   position: number;
-  substitutionExerciseIds: string[] | null;
+  targetSets: number;
+  targetReps: string;
+  targetRir: unknown;
+  loadPrescription: string;
+  loadValue: unknown;
+  progressionRule: { id: string; slotId: string; trigger: string; condition: string; action: string; bounds: string; resetBehavior: string | null; rationale: string; configVersion: string | null } | null;
   notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface PlanVersionRecord {
   id: string;
   planId: string;
-  versionNumber: number;
-  startsOn: CalendarDate;
-  endsOn?: CalendarDate;
-  rationaleNotes?: string;
-  /** Phase 3 lifecycle: only this and `supersededAt` may ever change. */
-  lifecycleStatus: string;
-  generationReason?: PlanGenerationReason;
-  parentVersionId?: string;
-  supersededAt?: Timestamp;
+  status: string;
+  planJson: string;
   configVersion?: string;
+  supersedesId?: string;
+  effectiveFrom: CalendarDate;
+  effectiveUntil?: CalendarDate;
+  startsOn?: CalendarDate;
+  versionNumber?: number;
+  rationaleNotes?: string;
   createdAt: string;
+  updatedAt: string;
   sessions: SessionTemplate[];
 }
 
@@ -93,14 +94,16 @@ export interface PlanAggregate {
   userId: string;
   name: string;
   status: string;
-  notes?: string;
-  /** `primary` or `temporary_environment` (Phase 3.1 §21). */
-  kind: string;
-  /** Environment the plan is intended for; absent = gym default. */
+  description?: string;
+  activeFrom?: CalendarDate;
+  activeUntil?: CalendarDate;
+  /** Plan kind: "primary" or "temporary_environment". */
+  kind?: "primary" | "temporary_environment";
+  /** Environment kind for temporary plans. */
   environmentKind?: string;
-  /** Last user-local day a temporary plan applies (inclusive). */
+  /** Last day the temporary plan applies. */
   effectiveUntil?: CalendarDate;
-  /** Plan version a temporary plan was adapted from. */
+  /** Version ID the temporary plan was adapted from. */
   temporaryForVersionId?: string;
   createdAt: string;
   updatedAt: string;
@@ -108,20 +111,24 @@ export interface PlanAggregate {
 }
 
 function slotRowToRecord(row: PlanSlotRow): ExerciseSlot {
-  const hasRange = row.repMin !== null || row.repMax !== null;
   return {
     id: row.id,
     exerciseId: row.exerciseId,
-    targetSets: row.targetSets ?? 0,
-    targetRepRange:
-      hasRange && row.repMin !== null && row.repMax !== null
-        ? { min: row.repMin, max: row.repMax }
-        : undefined,
+    targetSets: row.targetSets,
+    targetRepRange: row.targetReps ? parseRepRange(row.targetReps) : undefined,
     targetRir: decimalToNumber(row.targetRir),
-    restSeconds: row.restSeconds ?? undefined,
-    substitutionExerciseIds: row.substitutionExerciseIds ?? undefined,
+    restSeconds: undefined,
+    substitutionExerciseIds: undefined,
     notes: row.notes ?? undefined,
   };
+}
+
+function parseRepRange(targetReps: string): { min: number; max: number } | undefined {
+  const match = targetReps.match(/^(\d+)-(\d+)$/);
+  if (match && match[1] && match[2]) {
+    return { min: parseInt(match[1], 10), max: parseInt(match[2], 10) };
+  }
+  return undefined;
 }
 
 interface PlanSessionWithSlots extends PlanSessionRow {
@@ -131,8 +138,8 @@ interface PlanSessionWithSlots extends PlanSessionRow {
 function sessionRowToRecord(row: PlanSessionWithSlots): SessionTemplate {
   return {
     id: row.id,
-    name: row.name,
-    weekdayHint: row.weekdayHint ?? undefined,
+    name: row.name ?? "",
+    weekdayHint: row.dayOfWeek ?? 0,
     slots: row.slots
       .slice()
       .sort((a, b) => a.position - b.position)
@@ -148,19 +155,20 @@ function versionRowToRecord(row: PlanVersionWithSessions): PlanVersionRecord {
   return {
     id: row.id,
     planId: row.planId,
-    versionNumber: row.versionNumber,
-    startsOn: toCalendarDate(row.startsOn),
-    endsOn: row.endsOn ? toCalendarDate(row.endsOn) : undefined,
-    rationaleNotes: row.rationaleNotes ?? undefined,
-    lifecycleStatus: row.lifecycleStatus,
-    generationReason: (row.generationReason as PlanGenerationReason | null) ?? undefined,
-    parentVersionId: row.parentVersionId ?? undefined,
-    supersededAt: row.supersededAt ? toTimestamp(row.supersededAt) : undefined,
+    status: row.status,
+    planJson: row.planJson,
     configVersion: row.configVersion ?? undefined,
+    supersedesId: row.supersedesId ?? undefined,
+    effectiveFrom: toCalendarDate(row.effectiveFrom),
+    effectiveUntil: row.effectiveUntil ? toCalendarDate(row.effectiveUntil) : undefined,
+    startsOn: row.effectiveFrom ? toCalendarDate(row.effectiveFrom) : undefined,
+    versionNumber: undefined,
+    rationaleNotes: undefined,
     createdAt: toTimestamp(row.createdAt),
+    updatedAt: toTimestamp(row.updatedAt),
     sessions: row.sessions
       .slice()
-      .sort((a, b) => a.position - b.position)
+      .sort((a, b) => a.dayOfWeek - b.dayOfWeek)
       .map(sessionRowToRecord),
   };
 }
@@ -170,19 +178,35 @@ interface PlanWithVersions extends PlanRow {
 }
 
 function planRowToRecord(row: PlanWithVersions): PlanAggregate {
+  const latestVersion = row.versions
+    .slice()
+    .sort((a, b) => (a.effectiveFrom > b.effectiveFrom ? 1 : -1))[0];
+  let planJson: { kind?: string; environmentKind?: string; temporaryForVersionId?: string; effectiveUntil?: string } = {};
+  if (latestVersion) {
+    try {
+      planJson = JSON.parse(latestVersion.planJson);
+    } catch {
+      // ignore parse errors
+    }
+  }
   return {
     id: row.id,
     userId: row.userId,
     name: row.name,
     status: row.status,
-    notes: row.notes ?? undefined,
-    kind: row.kind ?? "primary",
-    ...(row.environmentKind ? { environmentKind: row.environmentKind } : {}),
-    ...(row.effectiveUntil ? { effectiveUntil: toCalendarDate(row.effectiveUntil) } : {}),
-    ...(row.temporaryForVersionId ? { temporaryForVersionId: row.temporaryForVersionId } : {}),
+    description: row.description ?? undefined,
+    activeFrom: row.activeFrom ? toCalendarDate(row.activeFrom) : undefined,
+    activeUntil: row.activeUntil ? toCalendarDate(row.activeUntil) : undefined,
+    kind: planJson.kind as "primary" | "temporary_environment" | undefined,
+    environmentKind: planJson.environmentKind,
+    temporaryForVersionId: planJson.temporaryForVersionId,
+    effectiveUntil: planJson.effectiveUntil,
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
-    versions: row.versions.slice().sort((a, b) => a.versionNumber - b.versionNumber).map(versionRowToRecord),
+    versions: row.versions
+      .slice()
+      .sort((a, b) => (a.effectiveFrom > b.effectiveFrom ? 1 : -1))
+      .map(versionRowToRecord),
   };
 }
 
@@ -190,11 +214,11 @@ const PLAN_INCLUDE = {
   versions: {
     include: {
       sessions: {
-        include: { slots: { orderBy: { position: "asc" as const } } },
-        orderBy: { position: "asc" as const },
+        include: { slots: { include: { progressionRule: true }, orderBy: { position: "asc" as const } } },
+        orderBy: { dayOfWeek: "asc" as const },
       },
     },
-    orderBy: { versionNumber: "asc" as const },
+    orderBy: { effectiveFrom: "asc" as const },
   },
 } as const;
 
@@ -267,11 +291,8 @@ export interface ExerciseSetRecord {
   durationSeconds?: number;
   rir?: number;
   rpe?: number;
-  /** Phase 3.1: declared or inferred load kind. */
   loadKind?: PerformanceLoadKind;
-  /** Assistance that reduced effective load (assisted pull-ups, etc.). */
   assistanceLoadKg?: number;
-  /** Set-level idempotency key. */
   clientRequestId?: string;
   notes?: string;
   createdAt: string;
@@ -284,9 +305,7 @@ export interface WorkoutExerciseRecord {
   exerciseId: string;
   position: number;
   notes?: string;
-  /** Planned slot this group fulfilled (Phase 3.1 link). */
   slotId?: string;
-  /** Exercise this one replaced, when performed as a substitution. */
   substitutedFromExerciseId?: string;
   performanceSource?: PerformanceSource;
   substitutionReason?: string;
@@ -307,9 +326,7 @@ export interface WorkoutRecord {
   endedAt?: Timestamp;
   notes?: string;
   clientRequestId?: string;
-  /** Environment the session was actually performed in. */
   environmentKind?: TrainingEnvironmentKind;
-  /** planned | adapted | makeup | unplanned. */
   sessionClassification?: SessionClassification;
   createdAt: string;
   updatedAt: string;
@@ -397,12 +414,6 @@ function workoutRowToRecord(row: WorkoutRow): WorkoutRecord {
   };
 }
 
-/**
- * Infer the load kind from the recorded columns so a bodyweight set is stored
- * as bodyweight rather than as "no load". Mirrors the domain contract in
- * `@fitcoach/fitness-core` (`inferLoadKind`) without importing it, because the
- * persistence layer must not depend on the engine package.
- */
 function inferLoadKindFromColumns(input: {
   loadKg?: number;
   addedLoadKg?: number;
@@ -450,30 +461,32 @@ const FINAL_WORKOUT_STATUSES: readonly string[] = ["completed", "partial", "skip
 export interface PlanSlotInput {
   exerciseId: string;
   targetSets?: number;
+  targetReps?: string;
+  targetRir?: number;
+  loadPrescription?: string;
+  loadValue?: number;
   repMin?: number;
   repMax?: number;
-  targetRir?: number;
-  restSeconds?: number;
-  substitutionExerciseIds?: readonly string[];
+  progressionRule?: ProgressionRuleInput;
   notes?: string;
 }
 
 export interface PlanSessionInput {
   name: string;
-  weekdayHint?: number;
+  dayOfWeek: number;
+  notes?: string;
+  estimatedDurationMinutes?: number;
   slots: readonly PlanSlotInput[];
 }
 
 export interface PlanVersionInput {
-  startsOn: CalendarDate;
-  endsOn?: CalendarDate;
-  rationaleNotes?: string;
-  /** Why this version exists (Phase 3); defaults to `plan_adjustment`. */
-  generationReason?: PlanGenerationReason;
-  /** Previous version this one supersedes; defaults to the current active one. */
-  parentVersionId?: string;
-  /** Training configuration version that produced this content. */
+  status?: "active" | "superseded" | "draft";
+  planJson: string;
   configVersion?: string;
+  supersedesId?: string;
+  effectiveFrom: CalendarDate;
+  effectiveUntil?: CalendarDate;
+  startsOn?: CalendarDate;
   sessions: readonly PlanSessionInput[];
 }
 
@@ -482,79 +495,72 @@ export interface CreatePlanInput {
   userId: string;
   name: string;
   status?: string;
-  notes?: string;
-  /** `primary` (default) or `temporary_environment` (Phase 3.1 §21). */
+  description?: string;
+  activeFrom?: CalendarDate;
+  activeUntil?: CalendarDate;
+  /** Plan kind: "primary" or "temporary_environment". */
   kind?: "primary" | "temporary_environment";
+  /** Environment kind for temporary plans. */
   environmentKind?: string;
-  /** Required (with `temporaryForVersionId`) when `kind` is temporary. */
+  /** Last day the temporary plan applies. */
   effectiveUntil?: CalendarDate;
+  /** Version ID the temporary plan was adapted from. */
   temporaryForVersionId?: string;
   version: PlanVersionInput;
 }
 
-/** Why a new plan version was created (Phase 3 §3). */
-export type PlanGenerationReason =
-  | "initial_plan"
-  | "plan_adjustment"
-  | "exercise_substitution"
-  | "volume_adjustment"
-  | "frequency_adjustment"
-  | "split_adjustment"
-  | "progression_adjustment"
-  | "no_change";
-
-/** The structured, reproducible decision behind a plan version (Phase 3 §23). */
-export interface PlanDecisionRecord {
-  id: string;
-  versionId: string;
-  decision: string;
-  reasonCodes: string[];
-  evidence: string;
-  satisfiedConstraints: string[];
-  violatedConstraints: string[];
-  affectedMuscles: string[];
-  affectedExercises: string[];
-  beforeSnapshot?: unknown;
-  afterSnapshot?: unknown;
-  confidence?: number;
-  assumptions: string[];
-  configVersion?: string;
-  createdAt: string;
-}
-
-export interface CreateDecisionInput {
-  versionId: string;
-  decision: string;
-  reasonCodes?: readonly string[];
-  evidence: string;
-  satisfiedConstraints?: readonly string[];
-  violatedConstraints?: readonly string[];
-  affectedMuscles?: readonly string[];
-  affectedExercises?: readonly string[];
-  beforeSnapshot?: unknown;
-  afterSnapshot?: unknown;
-  confidence?: number;
-  assumptions?: readonly string[];
-  configVersion?: string;
-}
-
-/** One constraint evaluated for a version (Phase 3 §15). */
 export interface PlanConstraintInput {
-  constraintKey: string;
   kind: string;
-  label: string;
-  isHard?: boolean;
-  result: "satisfied" | "violated" | "warning";
-  violationDetail?: string;
-  warningDetail?: string;
+  parameters: Record<string, unknown>;
+  rationale: string;
 }
 
 export interface PlanConstraintRecord extends PlanConstraintInput {
   id: string;
   versionId: string;
+  createdAt: string;
+  result: string;
 }
 
-/** Deterministic progression rule attached to one planned slot (Phase 3 §19). */
+export interface PlanDecisionInput {
+  kind: string;
+  rationale: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface PlanDecisionRecord extends PlanDecisionInput {
+  id: string;
+  versionId: string;
+  createdAt: string;
+}
+
+export type PlanGenerationReason =
+  | "volume_adjustment"
+  | "frequency_adjustment"
+  | "exercise_substitution"
+  | "split_adjustment"
+  | "progression_adjustment"
+  | "no_change"
+  | "plan_adjustment";
+
+export interface TrainingPlanRepository {
+  create(input: CreatePlanInput): Promise<PlanAggregate>;
+  addVersion(planId: string, version: PlanVersionInput): Promise<PlanVersionRecord>;
+  findById(planId: string): Promise<PlanAggregate | null>;
+  findActive(userId: string): Promise<PlanAggregate | null>;
+  listForUser(userId: string): Promise<PlanAggregate[]>;
+  /** Lists temporary environment plans for a user. */
+  listTemporary(userId: string): Promise<PlanAggregate[]>;
+  setStatus(planId: string, status: string): Promise<PlanAggregate>;
+  setProgressionRule(slotId: string, rule: ProgressionRuleInput): Promise<ProgressionRuleRecord>;
+  listProgressionRules(versionId: string): Promise<ProgressionRuleRecord[]>;
+  replaceConstraints(versionId: string, constraints: PlanConstraintInput[]): Promise<PlanConstraintRecord[]>;
+  recordDecision(versionId: string, decision: PlanDecisionInput): Promise<PlanDecisionRecord>;
+  listDecisions(versionId: string): Promise<PlanDecisionRecord[]>;
+  listConstraints(versionId: string): Promise<PlanConstraintRecord[]>;
+  listByUser(userId: string): Promise<PlanAggregate[]>;
+}
+
 export interface ProgressionRuleInput {
   trigger: string;
   condition: string;
@@ -568,133 +574,6 @@ export interface ProgressionRuleInput {
 export interface ProgressionRuleRecord extends ProgressionRuleInput {
   id: string;
   slotId: string;
-}
-
-export interface TrainingPlanRepository {
-  create(input: CreatePlanInput): Promise<PlanAggregate>;
-  /** Appends version N+1 with frozen content (§7); supersedes the active one. */
-  addVersion(planId: string, version: PlanVersionInput): Promise<PlanVersionRecord>;
-  findById(planId: string): Promise<PlanAggregate | null>;
-  findActive(userId: string): Promise<PlanAggregate | null>;
-  listForUser(userId: string): Promise<PlanAggregate[]>;
-  /** Temporary environment-adapted plans, newest first (Phase 3.1 §21). */
-  listTemporary(userId: string): Promise<PlanAggregate[]>;
-  setStatus(planId: string, status: string): Promise<PlanAggregate>;
-  /** Appends the structured decision behind a version (Phase 3 §23). */
-  recordDecision(input: CreateDecisionInput): Promise<PlanDecisionRecord>;
-  /** Decisions for one version, oldest first — the auditable trail. */
-  listDecisions(versionId: string): Promise<PlanDecisionRecord[]>;
-  /** Replaces the version's constraint evaluation (delete + insert, §7). */
-  replaceConstraints(versionId: string, constraints: readonly PlanConstraintInput[]): Promise<PlanConstraintRecord[]>;
-  listConstraints(versionId: string): Promise<PlanConstraintRecord[]>;
-  /** Attaches (or replaces) the progression rule for one planned slot. */
-  setProgressionRule(slotId: string, rule: ProgressionRuleInput): Promise<ProgressionRuleRecord>;
-  listProgressionRules(versionId: string): Promise<ProgressionRuleRecord[]>;
-}
-
-function parseDate(value: CalendarDate): Date {
-  return new Date(`${value}T00:00:00.000Z`);
-}
-
-async function createVersionRows(
-  tx: Prisma.TransactionClient,
-  versionId: string,
-  version: PlanVersionInput,
-): Promise<void> {
-  for (const [sessionIndex, session] of version.sessions.entries()) {
-    const sessionRow = await tx.trainingPlanSession.create({
-      data: {
-        id: newUuidv7(),
-        versionId,
-        name: session.name,
-        weekdayHint: session.weekdayHint ?? null,
-        position: sessionIndex,
-      },
-    });
-    for (const [slotIndex, slot] of session.slots.entries()) {
-      await tx.trainingPlanExerciseSlot.create({
-        data: {
-          id: newUuidv7(),
-          sessionId: sessionRow.id,
-          exerciseId: slot.exerciseId,
-          targetSets: slot.targetSets ?? null,
-          repMin: slot.repMin ?? null,
-          repMax: slot.repMax ?? null,
-          targetRir: slot.targetRir ?? null,
-          restSeconds: slot.restSeconds ?? null,
-          position: slotIndex,
-          substitutionExerciseIds: slot.substitutionExerciseIds
-            ? [...slot.substitutionExerciseIds]
-            : [],
-          notes: slot.notes ?? null,
-        },
-      });
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 3 rows: decisions, constraints, progression rules
-// ---------------------------------------------------------------------------
-
-function decisionRowToRecord(row: {
-  id: string;
-  versionId: string;
-  decision: string;
-  reasonCodes: string[];
-  evidence: string;
-  satisfiedConstraints: string[];
-  violatedConstraints: string[];
-  affectedMuscles: string[];
-  affectedExercises: string[];
-  beforeSnapshot: Prisma.JsonValue | null;
-  afterSnapshot: Prisma.JsonValue | null;
-  confidence: unknown;
-  assumptions: string[];
-  configVersion: string | null;
-  createdAt: Date;
-}): PlanDecisionRecord {
-  return {
-    id: row.id,
-    versionId: row.versionId,
-    decision: row.decision,
-    reasonCodes: [...row.reasonCodes],
-    evidence: row.evidence,
-    satisfiedConstraints: [...row.satisfiedConstraints],
-    violatedConstraints: [...row.violatedConstraints],
-    affectedMuscles: [...row.affectedMuscles],
-    affectedExercises: [...row.affectedExercises],
-    beforeSnapshot: row.beforeSnapshot ?? undefined,
-    afterSnapshot: row.afterSnapshot ?? undefined,
-    confidence: decimalToNumber(row.confidence),
-    assumptions: [...row.assumptions],
-    configVersion: row.configVersion ?? undefined,
-    createdAt: toTimestamp(row.createdAt),
-  };
-}
-
-function constraintRowToRecord(row: {
-  id: string;
-  versionId: string;
-  constraintKey: string;
-  kind: string;
-  label: string;
-  isHard: boolean;
-  result: string;
-  violationDetail: string | null;
-  warningDetail: string | null;
-}): PlanConstraintRecord {
-  return {
-    id: row.id,
-    versionId: row.versionId,
-    constraintKey: row.constraintKey,
-    kind: row.kind,
-    label: row.label,
-    isHard: row.isHard,
-    result: row.result as PlanConstraintInput["result"],
-    violationDetail: row.violationDetail ?? undefined,
-    warningDetail: row.warningDetail ?? undefined,
-  };
 }
 
 function ruleRowToRecord(row: {
@@ -743,34 +622,93 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
           throw new NotFoundError("one or more slot exercises do not exist");
         }
 
+        const effectiveFrom = new Date(`${input.version.effectiveFrom}T00:00:00.000Z`);
+        const effectiveUntil = input.version.effectiveUntil
+          ? new Date(`${input.version.effectiveUntil}T00:00:00.000Z`)
+          : null;
+
+        // Merge temporary plan metadata into planJson
+        let planJson: Record<string, unknown>;
+        try {
+          planJson = JSON.parse(input.version.planJson);
+        } catch {
+          planJson = {};
+        }
+        if (input.kind) planJson.kind = input.kind;
+        if (input.environmentKind) planJson.environmentKind = input.environmentKind;
+        if (input.temporaryForVersionId) planJson.temporaryForVersionId = input.temporaryForVersionId;
+        if (input.effectiveUntil) planJson.effectiveUntil = input.effectiveUntil;
+
         await tx.trainingPlan.create({
           data: {
             id: planId,
             userId: input.userId,
             name: input.name,
             status: input.status ?? "draft",
-            notes: input.notes ?? null,
-            kind: input.kind ?? "primary",
-            environmentKind: input.environmentKind ?? null,
-            effectiveUntil: input.effectiveUntil ? parseDate(input.effectiveUntil) : null,
-            temporaryForVersionId: input.temporaryForVersionId ?? null,
+            description: input.description ?? null,
+            activeFrom: input.activeFrom ? new Date(`${input.activeFrom}T00:00:00.000Z`) : null,
+            activeUntil: input.activeUntil ? new Date(`${input.activeUntil}T00:00:00.000Z`) : null,
           },
         });
+
         await tx.trainingPlanVersion.create({
           data: {
             id: versionId,
             planId,
-            versionNumber: 1,
-            startsOn: parseDate(input.version.startsOn),
-            endsOn: input.version.endsOn ? parseDate(input.version.endsOn) : null,
-            rationaleNotes: input.version.rationaleNotes ?? null,
-            lifecycleStatus: "active",
-            generationReason: input.version.generationReason ?? "initial_plan",
-            parentVersionId: null,
+            status: input.version.status ?? "active",
+            planJson: JSON.stringify(planJson),
             configVersion: input.version.configVersion ?? null,
+            supersedesId: input.version.supersedesId ?? null,
+            effectiveFrom,
+            effectiveUntil,
           },
         });
-        await createVersionRows(tx, versionId, input.version);
+
+        for (const sessionInput of input.version.sessions) {
+          const sessionRow = await tx.trainingPlanSession.create({
+            data: {
+              id: newUuidv7(),
+              versionId,
+              dayOfWeek: sessionInput.dayOfWeek,
+              name: sessionInput.name,
+              notes: sessionInput.notes ?? null,
+              estimatedDurationMinutes: sessionInput.estimatedDurationMinutes ?? null,
+            },
+          });
+
+          for (const [slotIndex, slotInput] of sessionInput.slots.entries()) {
+            const slotRow = await tx.trainingPlanExerciseSlot.create({
+              data: {
+                id: newUuidv7(),
+                sessionId: sessionRow.id,
+                exerciseId: slotInput.exerciseId,
+                position: slotIndex,
+                targetSets: slotInput.targetSets ?? 3,
+                targetReps: slotInput.targetReps ?? "8-12",
+                targetRir: slotInput.targetRir ?? 2,
+                loadPrescription: slotInput.loadPrescription ?? "rpe",
+                loadValue: slotInput.loadValue ?? null,
+                notes: slotInput.notes ?? null,
+              },
+            });
+
+            if (slotInput.progressionRule) {
+              await tx.trainingPlanProgressionRule.create({
+                data: {
+                  id: newUuidv7(),
+                  slotId: slotRow.id,
+                  trigger: slotInput.progressionRule.trigger,
+                  condition: slotInput.progressionRule.condition,
+                  action: slotInput.progressionRule.action,
+                  bounds: slotInput.progressionRule.bounds,
+                  resetBehavior: slotInput.progressionRule.resetBehavior ?? null,
+                  rationale: slotInput.progressionRule.rationale,
+                  configVersion: slotInput.progressionRule.configVersion ?? null,
+                },
+              });
+            }
+          }
+        }
 
         const created = await tx.trainingPlan.findUnique({
           where: { id: planId },
@@ -800,24 +738,20 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
           throw new NotFoundError("one or more slot exercises do not exist");
         }
 
-        const highest = await tx.trainingPlanVersion.aggregate({
-          where: { planId },
-          _max: { versionNumber: true },
-        });
-        const nextNumber = (highest._max.versionNumber ?? 0) + 1;
+        const effectiveFrom = new Date(`${version.effectiveFrom}T00:00:00.000Z`);
+        const effectiveUntil = version.effectiveUntil
+          ? new Date(`${version.effectiveUntil}T00:00:00.000Z`)
+          : null;
 
-        // Phase 3: supersede the previously active version. Only the two
-        // lifecycle columns move — the old version's content stays frozen
-        // (trigger `training_plan_versions_lifecycle_only`).
         const previousActive = await tx.trainingPlanVersion.findFirst({
-          where: { planId, lifecycleStatus: "active" },
-          orderBy: { versionNumber: "desc" },
+          where: { planId, status: "active" },
+          orderBy: { effectiveFrom: "desc" },
           select: { id: true },
         });
         if (previousActive) {
-          await tx.trainingPlanVersion.updateMany({
+          await tx.trainingPlanVersion.update({
             where: { id: previousActive.id },
-            data: { lifecycleStatus: "superseded", supersededAt: new Date() },
+            data: { status: "superseded" },
           });
         }
 
@@ -825,25 +759,67 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
           data: {
             id: versionId,
             planId,
-            versionNumber: nextNumber,
-            startsOn: parseDate(version.startsOn),
-            endsOn: version.endsOn ? parseDate(version.endsOn) : null,
-            rationaleNotes: version.rationaleNotes ?? null,
-            lifecycleStatus: "active",
-            generationReason:
-              version.generationReason ?? (nextNumber === 1 ? "initial_plan" : "plan_adjustment"),
-            parentVersionId: version.parentVersionId ?? previousActive?.id ?? null,
+            status: version.status ?? "active",
+            planJson: version.planJson,
             configVersion: version.configVersion ?? null,
+            supersedesId: version.supersedesId ?? previousActive?.id ?? null,
+            effectiveFrom,
+            effectiveUntil,
           },
         });
-        await createVersionRows(tx, versionId, version);
+
+        for (const sessionInput of version.sessions) {
+          const sessionRow = await tx.trainingPlanSession.create({
+            data: {
+              id: newUuidv7(),
+              versionId,
+              dayOfWeek: sessionInput.dayOfWeek,
+              name: sessionInput.name,
+              notes: sessionInput.notes ?? null,
+              estimatedDurationMinutes: sessionInput.estimatedDurationMinutes ?? null,
+            },
+          });
+
+          for (const [slotIndex, slotInput] of sessionInput.slots.entries()) {
+            const slotRow = await tx.trainingPlanExerciseSlot.create({
+              data: {
+                id: newUuidv7(),
+                sessionId: sessionRow.id,
+                exerciseId: slotInput.exerciseId,
+                position: slotIndex,
+                targetSets: slotInput.targetSets ?? 3,
+                targetReps: slotInput.targetReps ?? "8-12",
+                targetRir: slotInput.targetRir ?? 2,
+                loadPrescription: slotInput.loadPrescription ?? "rpe",
+                loadValue: slotInput.loadValue ?? null,
+                notes: slotInput.notes ?? null,
+              },
+            });
+
+            if (slotInput.progressionRule) {
+              await tx.trainingPlanProgressionRule.create({
+                data: {
+                  id: newUuidv7(),
+                  slotId: slotRow.id,
+                  trigger: slotInput.progressionRule.trigger,
+                  condition: slotInput.progressionRule.condition,
+                  action: slotInput.progressionRule.action,
+                  bounds: slotInput.progressionRule.bounds,
+                  resetBehavior: slotInput.progressionRule.resetBehavior ?? null,
+                  rationale: slotInput.progressionRule.rationale,
+                  configVersion: slotInput.progressionRule.configVersion ?? null,
+                },
+              });
+            }
+          }
+        }
 
         const created = await tx.trainingPlanVersion.findUnique({
           where: { id: versionId },
           include: {
             sessions: {
-              include: { slots: { orderBy: { position: "asc" } } },
-              orderBy: { position: "asc" },
+              include: { slots: { include: { progressionRule: true }, orderBy: { position: "asc" } } },
+              orderBy: { dayOfWeek: "asc" },
             },
           },
         });
@@ -865,14 +841,16 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
 
   async findActive(userId: string): Promise<PlanAggregate | null> {
     return runDb(async () => {
-      // Only the program of record: a temporary environment plan (Phase 3.1)
-      // must never become "the active plan" — the gym plan stays authoritative
-      // and is simply resumed when the environment changes back.
-      const row = await this.prisma.trainingPlan.findFirst({
-        where: { userId, status: "active", kind: "primary" },
+      // Fetch all active plans for the user and return the primary one.
+      // Temporary plans have temporaryForVersionId set in planJson.
+      const rows = await this.prisma.trainingPlan.findMany({
+        where: { userId, status: "active" },
         include: PLAN_INCLUDE,
       });
-      return row ? planRowToRecord(row) : null;
+      const all = rows.map(planRowToRecord);
+      // Prefer primary plan (kind !== "temporary_environment") over temporary.
+      const primary = all.find((p) => p.kind !== "temporary_environment");
+      return primary ?? all[0] ?? null;
     });
   }
 
@@ -890,11 +868,12 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
   async listTemporary(userId: string): Promise<PlanAggregate[]> {
     return runDb(async () => {
       const rows = await this.prisma.trainingPlan.findMany({
-        where: { userId, kind: "temporary_environment" },
+        where: { userId },
         include: PLAN_INCLUDE,
         orderBy: { createdAt: "desc" },
       });
-      return rows.map(planRowToRecord);
+      const allPlans = rows.map(planRowToRecord);
+      return allPlans.filter((plan) => plan.kind === "temporary_environment");
     });
   }
 
@@ -910,95 +889,6 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
     });
   }
 
-  async recordDecision(input: CreateDecisionInput): Promise<PlanDecisionRecord> {
-    const id = newUuidv7();
-    return runDb(async () => {
-      const version = await this.prisma.trainingPlanVersion.findUnique({
-        where: { id: input.versionId },
-        select: { id: true },
-      });
-      if (!version) throw new NotFoundError(`plan version ${input.versionId} not found`);
-
-      const row = await this.prisma.trainingPlanDecision.create({
-        data: {
-          id,
-          versionId: input.versionId,
-          decision: input.decision,
-          reasonCodes: [...(input.reasonCodes ?? [])],
-          evidence: input.evidence,
-          satisfiedConstraints: [...(input.satisfiedConstraints ?? [])],
-          violatedConstraints: [...(input.violatedConstraints ?? [])],
-          affectedMuscles: [...(input.affectedMuscles ?? [])],
-          affectedExercises: [...(input.affectedExercises ?? [])],
-          beforeSnapshot: (input.beforeSnapshot ?? undefined) as Prisma.InputJsonValue | undefined,
-          afterSnapshot: (input.afterSnapshot ?? undefined) as Prisma.InputJsonValue | undefined,
-          confidence: input.confidence,
-          assumptions: [...(input.assumptions ?? [])],
-          configVersion: input.configVersion ?? null,
-        },
-      });
-      return decisionRowToRecord(row);
-    });
-  }
-
-  async listDecisions(versionId: string): Promise<PlanDecisionRecord[]> {
-    return runDb(async () => {
-      const rows = await this.prisma.trainingPlanDecision.findMany({
-        where: { versionId },
-        orderBy: { createdAt: "asc" },
-      });
-      return rows.map(decisionRowToRecord);
-    });
-  }
-
-  async replaceConstraints(
-    versionId: string,
-    constraints: readonly PlanConstraintInput[],
-  ): Promise<PlanConstraintRecord[]> {
-    return runDb(async () => {
-      return this.prisma.$transaction(async (tx) => {
-        const version = await tx.trainingPlanVersion.findUnique({
-          where: { id: versionId },
-          select: { id: true },
-        });
-        if (!version) throw new NotFoundError(`plan version ${versionId} not found`);
-
-        // The table rejects updates, so a re-evaluation is delete + insert.
-        await tx.trainingPlanConstraint.deleteMany({ where: { versionId } });
-        for (const constraint of constraints) {
-          await tx.trainingPlanConstraint.create({
-            data: {
-              id: newUuidv7(),
-              versionId,
-              constraintKey: constraint.constraintKey,
-              kind: constraint.kind,
-              label: constraint.label,
-              isHard: constraint.isHard ?? true,
-              result: constraint.result,
-              violationDetail: constraint.violationDetail ?? null,
-              warningDetail: constraint.warningDetail ?? null,
-            },
-          });
-        }
-        const rows = await tx.trainingPlanConstraint.findMany({
-          where: { versionId },
-          orderBy: { constraintKey: "asc" },
-        });
-        return rows.map(constraintRowToRecord);
-      });
-    });
-  }
-
-  async listConstraints(versionId: string): Promise<PlanConstraintRecord[]> {
-    return runDb(async () => {
-      const rows = await this.prisma.trainingPlanConstraint.findMany({
-        where: { versionId },
-        orderBy: { constraintKey: "asc" },
-      });
-      return rows.map(constraintRowToRecord);
-    });
-  }
-
   async setProgressionRule(slotId: string, rule: ProgressionRuleInput): Promise<ProgressionRuleRecord> {
     return runDb(async () => {
       return this.prisma.$transaction(async (tx) => {
@@ -1008,7 +898,6 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
         });
         if (!slot) throw new NotFoundError(`plan slot ${slotId} not found`);
 
-        // Rules are frozen with their slot: replace rather than update.
         await tx.trainingPlanProgressionRule.deleteMany({ where: { slotId } });
         const row = await tx.trainingPlanProgressionRule.create({
           data: {
@@ -1037,6 +926,105 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
       return rows.map(ruleRowToRecord);
     });
   }
+
+  async replaceConstraints(versionId: string, constraints: PlanConstraintInput[]): Promise<PlanConstraintRecord[]> {
+    return runDb(async () => {
+      await this.prisma.trainingPlanConstraint.deleteMany({ where: { versionId } });
+      const rows = await this.prisma.$transaction(
+        constraints.map((c) =>
+          this.prisma.trainingPlanConstraint.create({
+            data: {
+              id: newUuidv7(),
+              versionId,
+              constraintKey: c.kind,
+              label: c.rationale,
+              result: "satisfied",
+              isHard: true,
+              violationDetail: null,
+              warningDetail: null,
+            },
+          })
+        )
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        versionId: row.versionId,
+        kind: row.constraintKey,
+        rationale: row.label,
+        result: row.result,
+        parameters: { isHard: row.isHard, violationDetail: row.violationDetail, warningDetail: row.warningDetail },
+        createdAt: toTimestamp(row.createdAt),
+      }));
+    });
+  }
+
+  async recordDecision(versionId: string, decision: PlanDecisionInput): Promise<PlanDecisionRecord> {
+    return runDb(async () => {
+      const row = await this.prisma.trainingPlanDecision.create({
+        data: {
+          id: newUuidv7(),
+          versionId,
+          kind: decision.kind,
+          rationale: decision.rationale,
+          parameters: decision.parameters as any,
+        },
+      });
+      return {
+        id: row.id,
+        versionId: row.versionId,
+        kind: row.kind,
+        rationale: row.rationale,
+        parameters: row.parameters as Record<string, unknown>,
+        createdAt: toTimestamp(row.createdAt),
+      };
+    });
+  }
+
+  async listDecisions(versionId: string): Promise<PlanDecisionRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlanDecision.findMany({
+        where: { versionId },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((row) => ({
+        id: row.id,
+        versionId: row.versionId,
+        kind: row.kind,
+        rationale: row.rationale,
+        parameters: (row.parameters as Record<string, unknown>) ?? {},
+        createdAt: toTimestamp(row.createdAt),
+      }));
+    });
+  }
+
+  async listConstraints(versionId: string): Promise<PlanConstraintRecord[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlanConstraint.findMany({
+        where: { versionId },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((row) => ({
+        id: row.id,
+        versionId: row.versionId,
+        kind: row.constraintKey,
+        rationale: row.label,
+        result: row.result,
+        parameters: { isHard: row.isHard, violationDetail: row.violationDetail, warningDetail: row.warningDetail },
+        createdAt: toTimestamp(row.createdAt),
+      }));
+    });
+  }
+
+  async listByUser(userId: string): Promise<PlanAggregate[]> {
+    return runDb(async () => {
+      const rows = await this.prisma.trainingPlan.findMany({
+        where: { userId },
+        include: PLAN_INCLUDE,
+        orderBy: { createdAt: "desc" },
+      });
+      return rows.map(planRowToRecord);
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,11 +1042,8 @@ export interface CreateWorkoutInput {
   startedAt: Timestamp;
   endedAt?: Timestamp;
   notes?: string;
-  /** Idempotency key (§15): a retry with the same key returns the same row. */
   clientRequestId?: string;
-  /** Environment the session was performed in (Phase 3.1). */
   environmentKind?: TrainingEnvironmentKind;
-  /** planned | adapted | makeup | unplanned. */
   sessionClassification?: SessionClassification;
 }
 
@@ -1074,20 +1059,14 @@ export interface AddSetInput {
   durationSeconds?: number;
   rir?: number;
   rpe?: number;
-  /** Explicit load kind; inferred from the columns when omitted. */
   loadKind?: PerformanceLoadKind;
-  /** Assistance load for assisted bodyweight work. */
   assistanceLoadKg?: number;
   notes?: string;
-  /** Set-level idempotency key (§32): replays return the same set. */
   clientRequestId?: string;
 }
 
-/** Optional Phase 3.1 metadata for a workout-exercise group. */
 export interface AddExerciseOptions {
-  /** Planned slot this group fulfils. */
   slotId?: string;
-  /** Exercise this one replaced, when performed as a substitution. */
   substitutedFromExerciseId?: string;
   performanceSource?: PerformanceSource;
   substitutionReason?: string;
@@ -1100,9 +1079,7 @@ export interface WorkoutHistoryQuery {
 }
 
 export interface WorkoutRepository {
-  /** Idempotent on (userId, clientRequestId); returns the existing row on replay. */
   create(input: CreateWorkoutInput): Promise<WorkoutRecord>;
-  /** Appends an exercise group; position defaults to the next slot. */
   addExercise(
     workoutId: string,
     exerciseId: string,
@@ -1111,7 +1088,6 @@ export interface WorkoutRepository {
     options?: AddExerciseOptions,
   ): Promise<WorkoutExerciseRecord>;
   addSet(input: AddSetInput): Promise<ExerciseSetRecord>;
-  /** Transitions an open workout to a final status. */
   complete(workoutId: string, status?: WorkoutStatus, endedAt?: Timestamp): Promise<WorkoutRecord>;
   findById(workoutId: string): Promise<WorkoutAggregate | null>;
   history(userId: string, query?: WorkoutHistoryQuery): Promise<WorkoutAggregate[]>;
@@ -1158,7 +1134,6 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
         });
         return workoutRowToRecord(row);
       } catch (error) {
-        // Lost idempotency race: another request created the same key.
         if (
           input.clientRequestId &&
           typeof error === "object" &&
@@ -1264,8 +1239,6 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
           throw new ImmutableRecordError("workout is finished; its sets are frozen");
         }
 
-        // Set-level idempotency (§32): a retried submission returns the row it
-        // already wrote instead of recording the set twice.
         if (input.clientRequestId) {
           const existing = await tx.exerciseSet.findFirst({
             where: {
@@ -1313,7 +1286,6 @@ export class PrismaWorkoutRepository implements WorkoutRepository {
             error !== null &&
             (error as { code?: string }).code === "P2002"
           ) {
-            // Lost idempotency race: another submission wrote the same key.
             if (input.clientRequestId) {
               const existing = await tx.exerciseSet.findFirst({
                 where: {

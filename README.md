@@ -13,10 +13,13 @@ The system optimizes the user's trajectory toward their chosen goal rather than 
 - `docs/PRODUCT_SPEC.md` — what the product must be able to do (V2 vision)
 - `docs/FITCOACH_ROADMAP.md` — what gets built, in what order
 - `docs/ARCHITECTURE.md` — system structure, AI boundary, privacy boundaries
+- `docs/UI_UX_PRINCIPLES.md` — the authoritative FitCoach UI/UX constitution
+- `docs/FRONTEND_ARCHITECTURE.md` — the Phase 4 product UI implementation
 
 ## Architecture
 
 - `apps/api` — application API
+- `apps/web` — the FitCoach product UI (React + Vite, anatomy-centered)
 - `apps/mobile` — future mobile client
 - `packages/domain` — canonical domain models
 - `packages/fitness-core` — deterministic training, muscle-coverage, progression and diagnosis logic
@@ -63,11 +66,22 @@ staffed — with pulling/back limits still stated honestly rather than faked,
 and bodyweight progression flowing into the ledger
 (`docs/FITCOACH_PHASE3_TRAINING_ENGINE.md` §45).
 
+Phase 4 product UI: the training experience on top of the frozen Phase 3
+engine — device-controlled light/dark design system, a first-party anatomical
+atlas with target-only highlighting driven by TargetMap, progressive
+onboarding, adaptive Home, today's workout, exercise detail, minimal
+performance mode with real set logging (including bodyweight and failure),
+engine-driven progression feedback, workout review, training history,
+environment/travel continuity and plan adaptation presentation
+(`docs/FRONTEND_ARCHITECTURE.md`).
+
 The architecture was reviewed against the expanded V2 product vision on
 2026-10-05: specification, architecture, database design (supported vs deferred
 review), package plans and roadmap updated without implementing future systems —
-no UI, AI coach, 3D renderer, computer vision, Health Connect or wearable code,
-and no imported datasets.
+at that point: no UI, AI coach, 3D renderer, computer vision, Health Connect or
+wearable code, and no imported datasets. (The UI described above arrived later,
+in Phase 4; the exclusions for AI coach, 3D renderer, computer vision, Health
+Connect, wearables and imported datasets still hold.)
 
 No openGym source has been copied into this repository.
 

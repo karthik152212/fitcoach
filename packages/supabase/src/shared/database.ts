@@ -6,7 +6,7 @@
  * - Pooled connections (runtime queries via PgBouncer)
  */
 
-import { getEnv } from "./env";
+import { getEnv } from "./env.js";
 
 /** Get the direct database URL (for migrations, Prisma CLI). */
 export function getDatabaseUrl(): string {

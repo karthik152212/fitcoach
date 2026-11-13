@@ -49,7 +49,7 @@ export function migrateDeploy(databaseUrl: string): void {
   const result = spawnSync(process.execPath, [cli, "migrate", "deploy", "--schema", schema], {
     env: { ...process.env, DATABASE_URL: databaseUrl },
     encoding: "utf8",
-    timeout: 300_000,
+    timeout: 600_000, // 10 minutes for Windows embedded postgres
   });
   if (result.status !== 0) {
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();

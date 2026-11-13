@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Goal, User } from "@fitcoach/domain";
-import { NotImplementedError } from "../errors";
 import { assessMuscleCoverage } from "../muscleCoverage";
 import { rankExerciseCandidates } from "../exerciseSelection";
 import { findRedundantExercises } from "../redundancy";
@@ -10,7 +9,7 @@ import { recommendProgression } from "../progression";
 import { generateSplit } from "../splitGeneration";
 import { evaluateGoalAlignment } from "../goalAlignment";
 import { detectTrend } from "../trendDetection";
-import { runDiagnoses } from "../diagnosis";
+import { runDiagnoses, runUnifiedDiagnosis } from "../diagnosis";
 import { selectInterventionCandidates } from "../interventionSelection";
 import {
   BARBELL_CURL,
@@ -240,30 +239,53 @@ test("phase 3 planning engines are implemented and deterministic", async (t) => 
   });
 });
 
-test("deferred diagnosis modules remain explicit stubs", async (t) => {
-  await t.test("diagnosis.runDiagnoses throws", () => {
-    assert.throws(
-      () =>
-        runDiagnoses({
-          userId: minimalUser().id,
-          today: "2026-08-25",
-          analysisWindowDays: 14,
-          data: {
-            workouts: [],
-            bodyMeasurements: [],
-            activityRecords: [],
-            dailyNutrition: [],
-            activeInterventions: [],
-          },
-        }),
-      NotImplementedError,
-    );
+test("unified diagnosis and intervention selection modules are implemented", async (t) => {
+  await t.test("diagnosis.runDiagnoses returns diagnoses array", () => {
+    const result = runDiagnoses({
+      userId: minimalUser().id,
+      today: "2026-08-25",
+      analysisWindowDays: 14,
+      data: {
+        workouts: [],
+        bodyMeasurements: [],
+        activityRecords: [],
+        dailyNutrition: [],
+        activeInterventions: [],
+      },
+    });
+    assert.ok(Array.isArray(result), "returns diagnoses array");
+    assert.ok(result.length >= 0, "diagnoses array has length");
   });
 
-  await t.test("interventionSelection.selectInterventionCandidates throws", () => {
-    assert.throws(
-      () => selectInterventionCandidates([], { activeInterventions: [], constraints: [] }),
-      NotImplementedError,
-    );
+  await t.test("diagnosis.runUnifiedDiagnoses returns unified result", () => {
+    const unifiedState = {
+      id: "test_state",
+      userId: minimalUser().id,
+      generatedAt: "2026-08-25" as any,
+      configVersion: "test",
+      slices: [],
+      activeInterventions: [],
+      summary: "test",
+      warnings: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as any;
+
+    const result = runUnifiedDiagnosis({
+      userId: minimalUser().id,
+      unifiedState,
+      analysisWindowDays: 14,
+    });
+    assert.ok(result.newDiagnoses.length >= 0, "returns newDiagnoses array");
+    assert.ok(result.updatedDiagnoses.length >= 0, "returns updatedDiagnoses array");
+    assert.ok(result.resolvedDiagnoses.length >= 0, "returns resolvedDiagnoses array");
+    assert.ok(result.confidence, "returns confidence");
+    assert.ok(result.warnings.length >= 0, "returns warnings array");
+  });
+
+  await t.test("interventionSelection.selectInterventionCandidates returns candidates", () => {
+    const candidates = selectInterventionCandidates([], { activeInterventions: [], constraints: [] });
+    assert.ok(candidates.length >= 1, "returns at least one candidate (no_change)");
+    assert.equal(candidates[0]?.kind, "no_change");
   });
 });

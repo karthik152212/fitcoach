@@ -529,9 +529,9 @@ export class TrainingContinuityService {
       decision: command.decision,
       idempotencyKey: command.idempotencyKey,
       ...(command.reason !== undefined ? { reason: command.reason } : {}),
-      ...(command.actualChange ? { actualChange: command.actualChange } : {}),
+      ...(command.actualChange ? { actualChange: command.actualChange as any } : {}),
       ...(command.resultingPerformance
-        ? { resultingPerformance: command.resultingPerformance }
+        ? { resultingPerformance: command.resultingPerformance as any }
         : {}),
       evidence: command.evidence ?? [],
     });

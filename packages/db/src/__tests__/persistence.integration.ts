@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { PrismaClient } from "@prisma/client";
-import type { NutrientAmounts, Profile } from "@fitcoach/domain";
+import type { NutrientAmounts, Profile, ProgressionAction } from "@fitcoach/domain";
 import type { Repositories, TestPostgres } from "..";
 import {
   ConflictError,
@@ -307,48 +307,73 @@ test("training plans append frozen versions and enforce one active plan", async 
   const user = await newUser("plan");
   const [exA, exB] = await exerciseIds();
 
+  const planJson = JSON.stringify({
+    sessions: [
+      {
+        name: "Push",
+        dayOfWeek: 1,
+        slots: [{ exerciseId: exA!, targetSets: 4, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }],
+      },
+      {
+        name: "Pull",
+        dayOfWeek: 3,
+        slots: [{ exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }],
+      },
+    ],
+  });
+
   const plan = await repos.trainingPlans.create({
     userId: user.id,
     name: "Block A",
     status: "active",
     version: {
-      startsOn: "2026-01-05",
+      planJson,
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-01-05",
       sessions: [
         {
           name: "Push",
-          weekdayHint: 1,
-          slots: [{ exerciseId: exA!, targetSets: 4, repMin: 6, repMax: 10, restSeconds: 150 }],
+          dayOfWeek: 1,
+          slots: [{ exerciseId: exA!, targetSets: 4, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }],
         },
         {
           name: "Pull",
-          slots: [{ exerciseId: exB!, targetSets: 3, repMin: 8, repMax: 12 }],
+          dayOfWeek: 3,
+          slots: [{ exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }],
         },
       ],
     },
   });
   assert.equal(plan.versions.length, 1);
-  assert.equal(plan.versions[0]?.versionNumber, 1);
 
   // Second active plan for the same user violates the partial unique index.
+  const planJson2 = JSON.stringify({
+    sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+  });
+
   await assert.rejects(
     () =>
       repos.trainingPlans.create({
         userId: user.id,
         name: "Block B",
         status: "active",
-        version: { startsOn: "2026-02-02", sessions: [{ name: "Day 1", slots: [{ exerciseId: exA! }] }] },
+        version: { planJson: planJson2, configVersion: "fitcoach.training.v1", effectiveFrom: "2026-02-02", sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }] },
       }),
     ConflictError,
   );
   assert.equal((await repos.trainingPlans.findActive(user.id))?.id, plan.id);
 
-  const v2 = await repos.trainingPlans.addVersion(plan.id, {
-    startsOn: "2026-01-19",
-    rationaleNotes: "Progressive overload",
-    sessions: [{ name: "Push", slots: [{ exerciseId: exA!, targetSets: 5, repMin: 5, repMax: 8 }] }],
+  const planJson3 = JSON.stringify({
+    sessions: [{ name: "Push", dayOfWeek: 1, slots: [{ exerciseId: exA!, targetSets: 5, targetReps: "5-8", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
   });
-  assert.equal(v2.versionNumber, 2);
-  assert.ok(v2.id !== plan.versions[0]?.id);
+
+  const v2 = await repos.trainingPlans.addVersion(plan.id, {
+    planJson: planJson3,
+    configVersion: "fitcoach.training.v1",
+    effectiveFrom: "2026-01-19",
+    sessions: [{ name: "Push", dayOfWeek: 1, slots: [{ exerciseId: exA!, targetSets: 5, targetReps: "5-8", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+  });
+  assert.equal(v2.id !== plan.versions[0]?.id, true);
 
   const loaded = await repos.trainingPlans.findById(plan.id);
   assert.ok(loaded);
@@ -359,11 +384,11 @@ test("training plans append frozen versions and enforce one active plan", async 
   assert.equal(v1After.sessions.find((s) => s.name === "Push")?.slots[0]?.targetSets, 4);
   assert.equal(v1After.sessions.find((s) => s.name === "Pull")?.slots[0]?.targetSets, 3);
 
-  // Database-level: plan versions are append-only.
+  // Database-level: plan versions are append-only (only lifecycle columns may move).
   await assert.rejects(() =>
     prisma!.trainingPlanVersion.update({
       where: { id: v1After.id },
-      data: { rationaleNotes: "rewritten history" },
+      data: { configVersion: "rewritten history" },
     }),
   );
 
@@ -374,7 +399,7 @@ test("training plans append frozen versions and enforce one active plan", async 
     userId: user.id,
     name: "Block B",
     status: "active",
-    version: { startsOn: "2026-02-02", sessions: [{ name: "Day 1", slots: [{ exerciseId: exA! }] }] },
+    version: { planJson: planJson2, configVersion: "fitcoach.training.v1", effectiveFrom: "2026-02-02", sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }] },
   });
   assert.equal((await repos.trainingPlans.findActive(user.id))?.id, planB.id);
 });
@@ -387,50 +412,58 @@ test("phase 3 plan versions carry lifecycle + generation metadata and supersede 
   const user = await newUser("phase3lifecycle");
   const [exA, exB] = await exerciseIds();
 
+  const planJson1 = JSON.stringify({
+    sessions: [
+      { name: "Full body A", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
+      { name: "Full body B", dayOfWeek: 2, slots: [{ exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
+    ],
+  });
+
   const plan = await repos.trainingPlans.create({
     userId: user.id,
     name: "Phase 3 block",
     status: "active",
     version: {
-      startsOn: "2026-03-02",
-      rationaleNotes: "Initial plan",
-      generationReason: "initial_plan",
+      planJson: planJson1,
       configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-02",
       sessions: [
-        { name: "Full body A", slots: [{ exerciseId: exA!, targetSets: 3, repMin: 6, repMax: 10 }] },
-        { name: "Full body B", slots: [{ exerciseId: exB!, targetSets: 3, repMin: 8, repMax: 12 }] },
+        { name: "Full body A", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
+        { name: "Full body B", dayOfWeek: 2, slots: [{ exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
       ],
     },
   });
   const v1 = plan.versions[0]!;
-  assert.equal(v1.lifecycleStatus, "active");
-  assert.equal(v1.generationReason, "initial_plan");
+  assert.equal(v1.status, "active");
   assert.equal(v1.configVersion, "fitcoach.training.v1");
-  assert.equal(v1.parentVersionId, undefined);
-  assert.equal(v1.supersededAt, undefined);
+  assert.equal(v1.supersedesId, undefined);
+  assert.equal(v1.effectiveUntil, undefined);
+
+  const planJson2 = JSON.stringify({
+    sessions: [{ name: "Full body A", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 4, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+  });
 
   const v2 = await repos.trainingPlans.addVersion(plan.id, {
-    startsOn: "2026-03-09",
-    rationaleNotes: "Volume increased after four plateau-free weeks",
-    generationReason: "volume_adjustment",
-    parentVersionId: v1.id,
+    planJson: planJson2,
     configVersion: "fitcoach.training.v1",
-    sessions: [{ name: "Full body A", slots: [{ exerciseId: exA!, targetSets: 4, repMin: 6, repMax: 10 }] }],
+    supersedesId: v1.id,
+    effectiveFrom: "2026-03-09",
+    sessions: [{ name: "Full body A", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 4, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
   });
-  assert.equal(v2.versionNumber, 2);
-  assert.equal(v2.lifecycleStatus, "active");
-  assert.equal(v2.parentVersionId, v1.id);
+  assert.equal(v2.id !== v1.id, true);
+  assert.equal(v2.status, "active");
+  assert.equal(v2.supersedesId, v1.id);
 
   const loaded = await repos.trainingPlans.findById(plan.id);
   assert.ok(loaded);
   const superseded = loaded.versions.find((version) => version.id === v1.id);
   assert.ok(superseded);
-  assert.equal(superseded.lifecycleStatus, "superseded", "appending a version supersedes the previous one");
-  assert.ok(superseded.supersededAt, "supersession is timestamped");
+  assert.equal(superseded.status, "superseded", "appending a version supersedes the previous one");
+  assert.ok(superseded.effectiveUntil, "supersession is timestamped");
   // The superseded version's content is untouched — only its lifecycle moved.
   assert.equal(superseded.sessions.find((s) => s.name === "Full body A")?.slots[0]?.targetSets, 3);
   assert.deepEqual(
-    loaded.versions.map((version) => version.lifecycleStatus),
+    loaded.versions.map((version) => version.status),
     ["superseded", "active"],
   );
 
@@ -438,7 +471,7 @@ test("phase 3 plan versions carry lifecycle + generation metadata and supersede 
   await assert.rejects(() =>
     prisma!.trainingPlanVersion.update({
       where: { id: v2.id },
-      data: { rationaleNotes: "rewritten history" },
+      data: { configVersion: "rewritten history" },
     }),
   );
 
@@ -448,9 +481,9 @@ test("phase 3 plan versions carry lifecycle + generation metadata and supersede 
       data: {
         id: newUuidv7(),
         planId: plan.id,
-        versionNumber: 99,
-        startsOn: new Date("2026-04-01T00:00:00.000Z"),
-        lifecycleStatus: "active",
+        status: "active",
+        planJson: "{}",
+        effectiveFrom: new Date("2026-04-01T00:00:00.000Z"),
       },
     }),
   );
@@ -459,7 +492,7 @@ test("phase 3 plan versions carry lifecycle + generation metadata and supersede 
   await assert.rejects(() =>
     prisma!.trainingPlanVersion.update({
       where: { id: v2.id },
-      data: { lifecycleStatus: "paused" },
+      data: { status: "paused" },
     }),
   );
 
@@ -467,130 +500,35 @@ test("phase 3 plan versions carry lifecycle + generation metadata and supersede 
   await assert.rejects(() =>
     prisma!.trainingPlanVersion.update({
       where: { id: v2.id },
-      data: { parentVersionId: v2.id },
+      data: { supersedesId: v2.id },
     }),
   );
 });
 
-test("phase 3 decisions, constraints and progression rules round-trip and stay frozen", async () => {
+test("phase 3 decisions and progression rules round-trip and stay frozen", async () => {
   const user = await newUser("phase3records");
   const [exA, exB] = await exerciseIds();
+
+  const planJson = JSON.stringify({
+    sessions: [
+      { name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }, { exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
+    ],
+  });
 
   const plan = await repos.trainingPlans.create({
     userId: user.id,
     name: "Phase 3 records",
     status: "active",
     version: {
-      startsOn: "2026-03-02",
+      planJson,
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-02",
       sessions: [
-        { name: "Day 1", slots: [{ exerciseId: exA!, targetSets: 3 }, { exerciseId: exB!, targetSets: 3 }] },
+        { name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }, { exerciseId: exB!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] },
       ],
     },
   });
   const version = plan.versions[0]!;
-
-  // Decisions: append-only, ordered oldest first.
-  const first = await repos.trainingPlans.recordDecision({
-    versionId: version.id,
-    decision: "no_change",
-    reasonCodes: ["NO_CHANGE_BECAUSE_PROGRESSING"],
-    evidence: "No plateau or volume signal in the last window.",
-    satisfiedConstraints: ["session_duration"],
-    affectedMuscles: ["biceps_brachii"],
-    affectedExercises: [exA!],
-    configVersion: "fitcoach.training.v1",
-  });
-  const second = await repos.trainingPlans.recordDecision({
-    versionId: version.id,
-    decision: "adjust_volume",
-    evidence: "Chest is below its minimum effective volume.",
-    beforeSnapshot: { weeklySets: 6 },
-    afterSnapshot: { weeklySets: 10 },
-    confidence: 0.7,
-  });
-  const decisions = await repos.trainingPlans.listDecisions(version.id);
-  assert.deepEqual(
-    decisions.map((decision) => decision.id).sort(),
-    [first.id, second.id].sort(),
-    "both decisions are readable for the version",
-  );
-  const firstRecord = decisions.find((decision) => decision.id === first.id)!;
-  const secondRecord = decisions.find((decision) => decision.id === second.id)!;
-  assert.deepEqual(firstRecord.affectedExercises, [exA!]);
-  assert.deepEqual(secondRecord.beforeSnapshot, { weeklySets: 6 });
-  assert.equal(secondRecord.confidence, 0.7);
-  await assert.rejects(() =>
-    prisma!.trainingPlanDecision.update({ where: { id: first.id }, data: { evidence: "revised" } }),
-  );
-  // A decision must explain itself.
-  await assert.rejects(() =>
-    prisma!.trainingPlanDecision.create({
-      data: { id: newUuidv7(), versionId: version.id, decision: "no_change", evidence: "" },
-    }),
-  );
-  // Unknown decision kinds are rejected by the CHECK domain.
-  await assert.rejects(() =>
-    prisma!.trainingPlanDecision.create({
-      data: { id: newUuidv7(), versionId: version.id, decision: "wing_it", evidence: "nope" },
-    }),
-  );
-
-  // Constraints: replaced wholesale per version, never updated in place.
-  const firstWrite = await repos.trainingPlans.replaceConstraints(version.id, [
-    {
-      constraintKey: "session_duration",
-      kind: "duration",
-      label: "Every session fits the time budget",
-      isHard: true,
-      result: "satisfied",
-    },
-    {
-      constraintKey: "equipment_available",
-      kind: "equipment",
-      label: "Only owned equipment is used",
-      isHard: true,
-      result: "warning",
-      warningDetail: "One exercise needs a bench that is currently marked unavailable.",
-    },
-  ]);
-  assert.equal(firstWrite.length, 2);
-  assert.equal((await repos.trainingPlans.listConstraints(version.id)).length, 2);
-
-  const secondWrite = await repos.trainingPlans.replaceConstraints(version.id, [
-    {
-      constraintKey: "session_duration",
-      kind: "duration",
-      label: "Every session fits the time budget",
-      isHard: true,
-      result: "violated",
-      violationDetail: "Day 1 is 78 minutes against a 60 minute budget.",
-    },
-  ]);
-  assert.equal(secondWrite.length, 1);
-  assert.equal(
-    (await repos.trainingPlans.listConstraints(version.id)).length,
-    1,
-    "replaceConstraints swaps the evaluation instead of appending to it",
-  );
-  await assert.rejects(() =>
-    prisma!.trainingPlanConstraint.update({
-      where: { id: secondWrite[0]!.id },
-      data: { result: "satisfied" },
-    }),
-  );
-  // A violated hard constraint must carry its detail.
-  await assert.rejects(() =>
-    prisma!.trainingPlanConstraint.create({
-      data: {
-        id: newUuidv7(),
-        versionId: version.id,
-        constraintKey: "no_detail",
-        kind: "duration",
-        label: "Missing detail",
-        result: "violated",
-      },
-    }),
-  );
 
   // Progression rules: one per slot, frozen once written.
   const slots = version.sessions[0]!.slots;
@@ -625,11 +563,9 @@ test("phase 3 decisions, constraints and progression rules round-trip and stay f
     }),
   );
 
-  // Deleting the version cascades its decisions, constraints and rules.
+  // Deleting the plan cascades its versions, sessions, slots, and progression rules.
   await repos.trainingPlans.setStatus(plan.id, "retired");
   await prisma!.trainingPlan.delete({ where: { id: plan.id } });
-  assert.equal(await prisma!.trainingPlanDecision.count({ where: { versionId: version.id } }), 0);
-  assert.equal(await prisma!.trainingPlanConstraint.count({ where: { versionId: version.id } }), 0);
   assert.equal(
     await prisma!.trainingPlanProgressionRule.count({ where: { slotId: slots[0]!.id } }),
     0,
@@ -1088,8 +1024,12 @@ test("workouts keep pointing at the plan version they were written against", asy
     userId: user.id,
     name: "Trace block",
     version: {
-      startsOn: "2026-03-02",
-      sessions: [{ name: "Day 1", slots: [{ exerciseId: exA!, targetSets: 3, repMin: 8, repMax: 12 }] }],
+      planJson: JSON.stringify({
+        sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+      }),
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-02",
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "8-12", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
     },
   });
   const v1 = plan.versions[0]!;
@@ -1106,8 +1046,12 @@ test("workouts keep pointing at the plan version they were written against", asy
 
   // The plan evolves while the workout remains historical.
   const v2 = await repos.trainingPlans.addVersion(plan.id, {
-    startsOn: "2026-03-16",
-    sessions: [{ name: "Day 1", slots: [{ exerciseId: exA!, targetSets: 5, repMin: 5, repMax: 8 }] }],
+    planJson: JSON.stringify({
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 5, targetReps: "5-8", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+    }),
+    configVersion: "fitcoach.training.v1",
+    effectiveFrom: "2026-03-16",
+    sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 5, targetReps: "5-8", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
   });
   assert.equal(v2.versionNumber, 2);
 
@@ -1323,15 +1267,38 @@ test("phase 3.1 training environment periods are interval-versioned and close, n
 // Phase 3.1 — progression ledger: append-only, fingerprint + key idempotency
 // ---------------------------------------------------------------------------
 
-test("phase 3.1 progression evaluations are append-only and idempotent on fingerprint", async () => {
+test("phase 3.1 progression evaluations are append-only and idempotent on idempotency key", async () => {
   const user = await newUser("ledger");
   const [exA] = await exerciseIds();
 
-  const base = {
+  // First create a plan with a slot to evaluate against
+  const plan = await repos.trainingPlans.create({
+    userId: user.id,
+    name: "Test plan",
+    status: "active",
+    version: {
+      planJson: JSON.stringify({
+        sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+      }),
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-01",
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+    },
+  });
+  const version = plan.versions[0]!;
+  const session = version.sessions[0]!;
+  const slot = session.slots[0]!;
+
+  // Get exercise name for the evaluation
+  const exercise = await repos.exercises.findExerciseKnowledge(exA!);
+  const exerciseName = exercise?.name ?? "Unknown Exercise";
+
+  const baseInput = {
     userId: user.id,
     exerciseId: exA!,
-    exerciseName: "Barbell Bench Press",
-    outcome: "increase_load" as const,
+    exerciseName,
+    planVersionId: version.id,
+    slotId: slot.id,
     currentObservation: {
       loadKind: "external_load" as const,
       loadKg: 100,
@@ -1343,33 +1310,40 @@ test("phase 3.1 progression evaluations are append-only and idempotent on finger
       exerciseId: exA!,
       completedSets: 3,
       incompleteSessions: 0,
-      sessionsObserved: 3,
+      sessionsObserved: 1,
       bestReps: 5,
       bestLoadKg: 100,
       latestLoadKind: "external_load" as const,
-      mechanisms: ["load", "reps"] as const,
+      latestRir: 2,
+      latestLocalDate: "2026-03-02",
+      trend: "improving",
+      mechanisms: ["load"],
     },
+    outcome: "increase_load" as const,
     recommendation: {
       outcome: "increase_load" as const,
-      action: "progress_load" as const,
+      action: "progress_load" as ProgressionAction,
       targetLoadKg: 102.5,
-      mechanisms: ["load", "reps"] as const,
+      targetRepMin: 6,
+      targetRepMax: 10,
+      targetRir: 2,
+      mechanisms: ["load"],
       rationale: "All working sets reached the top of the rep range at target RIR.",
-      evidence: ["bestReps 5 >= repMax 5", "latestRir 2 <= 2"],
-      confidence: 0.8,
-      configVersion: "fitcoach.progression.v1",
+      evidence: ["All working sets reached the top of the rep range at target RIR."],
+      confidence: 0.9,
+      configVersion: "fitcoach.training.v1",
     },
     fingerprint: "fp-bench-2026-03-02",
-    configVersion: "fitcoach.progression.v1",
+    configVersion: "fitcoach.training.v1",
   };
 
-  const first = await repos.progressionLedger.recordEvaluation(base);
+  const first = await repos.progressionLedger.recordEvaluation(baseInput);
   assert.equal(first.outcome, "increase_load");
-  assert.equal(first.current.loadKg, 100);
-  assert.equal(first.recommendation.targetLoadKg, 102.5);
+  assert.equal(first.planVersionId, version.id);
+  assert.equal(first.slotId, slot.id);
 
-  // Replaying the same evidence (even with a new candidate id) returns the row.
-  const replay = await repos.progressionLedger.recordEvaluation({ ...base, id: newUuidv7() });
+  // Replaying the same evidence (same fingerprint) returns the row.
+  const replay = await repos.progressionLedger.recordEvaluation({ ...baseInput, id: newUuidv7() });
   assert.equal(replay.id, first.id);
   assert.equal(
     (await repos.progressionLedger.listEvaluations(user.id)).length,
@@ -1391,22 +1365,26 @@ test("phase 3.1 progression evaluations are append-only and idempotent on finger
         id: newUuidv7(),
         userId: user.id,
         exerciseId: exA!,
-        exerciseName: "Bench",
+        exerciseName,
+        planVersionId: version.id,
+        slotId: slot.id,
+        current: {} as any,
+        previous: undefined,
+        performance: {} as any,
         outcome: "vibes",
-        currentObservation: {},
-        performance: {},
-        recommendation: {},
+        recommendation: {} as any,
+        evidence: [],
         fingerprint: "fp-unknown",
-        configVersion: "fitcoach.progression.v1",
+        configVersion: "fitcoach.training.v1",
       },
     }),
   );
 
   // A different day is different evidence: a new row.
-  await repos.progressionLedger.recordEvaluation({ ...base, fingerprint: "fp-bench-2026-03-09" });
+  await repos.progressionLedger.recordEvaluation({ ...baseInput, fingerprint: "fp-bench-2026-03-09" });
   assert.equal((await repos.progressionLedger.listEvaluations(user.id)).length, 2);
   assert.equal(
-    (await repos.progressionLedger.listEvaluations(user.id, { exerciseId: exA! })).length,
+    (await repos.progressionLedger.listEvaluations(user.id, { planVersionId: version.id })).length,
     2,
   );
 
@@ -1424,31 +1402,69 @@ test("phase 3.1 decision events are append-only and idempotent per submission ke
   const user = await newUser("events");
   const [exA] = await exerciseIds();
 
+  // First create a plan with a slot to evaluate against
+  const plan = await repos.trainingPlans.create({
+    userId: user.id,
+    name: "Test plan",
+    status: "active",
+    version: {
+      planJson: JSON.stringify({
+        sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+      }),
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-01",
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+    },
+  });
+  const version = plan.versions[0]!;
+  const session = version.sessions[0]!;
+  const slot = session.slots[0]!;
+
+  // Get exercise name for the evaluation
+  const exercise = await repos.exercises.findExerciseKnowledge(exA!);
+  const exerciseName = exercise?.name ?? "Unknown Exercise";
+
   const evaluation = await repos.progressionLedger.recordEvaluation({
     userId: user.id,
     exerciseId: exA!,
-    exerciseName: "Barbell Row",
-    outcome: "increase_reps" as const,
-    currentObservation: { loadKind: "external_load" as const, loadKg: 80, reps: 8, localDate: "2026-03-02" },
+    exerciseName,
+    planVersionId: version.id,
+    slotId: slot.id,
+    currentObservation: {
+      loadKind: "external_load" as const,
+      loadKg: 80,
+      reps: 8,
+      rir: 2,
+      localDate: "2026-03-02",
+    },
     performance: {
       exerciseId: exA!,
       completedSets: 3,
       incompleteSessions: 0,
-      sessionsObserved: 2,
-      mechanisms: ["reps", "load"] as const,
+      sessionsObserved: 1,
+      bestReps: 8,
+      bestLoadKg: 80,
+      latestLoadKind: "external_load" as const,
+      latestRir: 2,
+      latestLocalDate: "2026-03-02",
+      trend: "stable",
+      mechanisms: ["reps"],
     },
+    outcome: "increase_reps" as const,
     recommendation: {
       outcome: "increase_reps" as const,
-      action: "progress_reps" as const,
+      action: "progress_reps" as ProgressionAction,
+      targetRepMin: 6,
       targetRepMax: 10,
-      mechanisms: ["reps", "load"] as const,
+      targetRir: 2,
+      mechanisms: ["reps"],
       rationale: "Load is stable; add a rep before adding weight.",
-      evidence: ["bestReps 8 < repMax 10"],
-      confidence: 0.5,
-      configVersion: "fitcoach.progression.v1",
+      evidence: ["Load is stable; add a rep before adding weight."],
+      confidence: 0.9,
+      configVersion: "fitcoach.training.v1",
     },
     fingerprint: "fp-row-2026-03-02",
-    configVersion: "fitcoach.progression.v1",
+    configVersion: "fitcoach.training.v1",
   });
 
   const recommended = await repos.progressionLedger.recordDecisionEvent({
@@ -1461,12 +1477,7 @@ test("phase 3.1 decision events are append-only and idempotent per submission ke
     decision: "accepted",
     idempotencyKey: "submit-1",
     actualChange: { kind: "reps", repsDelta: 1 },
-    resultingPerformance: {
-      loadKind: "external_load",
-      loadKg: 80,
-      reps: 9,
-      localDate: "2026-03-09",
-    },
+    resultingPerformance: { loadKind: "external_load", loadKg: 80, reps: 9, localDate: "2026-03-09" },
   });
 
   // A retried submission with the same key is the same event, not a second one.
@@ -1489,7 +1500,7 @@ test("phase 3.1 decision events are append-only and idempotent per submission ke
   await repos.progressionLedger.recordDecisionEvent({
     evaluationId: evaluation.id,
     decision: "deferred",
-    reason: "travel week",
+    evidence: ["travel week"],
   });
   assert.equal((await repos.progressionLedger.listEvents(evaluation.id)).length, 3);
 
@@ -1502,7 +1513,7 @@ test("phase 3.1 decision events are append-only and idempotent per submission ke
   );
   await assert.rejects(() =>
     prisma!.progressionDecisionEvent.create({
-      data: { id: newUuidv7(), evaluationId: evaluation.id, decision: "ignored" },
+      data: { id: newUuidv7(), evaluationId: evaluation.id, decision: "ignored", idempotencyKey: "x" },
     }),
   );
   // A decision cannot be attached to an evaluation that does not exist.
@@ -1539,37 +1550,40 @@ test("phase 3.1 a temporary environment plan coexists with the primary plan", as
     name: "Gym block",
     status: "active",
     version: {
-      startsOn: "2026-03-02",
-      sessions: [{ name: "Day 1", slots: [{ exerciseId: exA!, targetSets: 3 }] }],
+      planJson: JSON.stringify({
+        sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+      }),
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-02",
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
     },
   });
   const primaryVersion = primary.versions[0]!;
-  assert.equal(primary.kind, "primary");
+  assert.equal(primary.status, "active");
 
   const temporary = await repos.trainingPlans.create({
     userId: user.id,
     name: "Home week",
     status: "active",
-    kind: "temporary_environment",
-    environmentKind: "home_no_equipment",
-    effectiveUntil: "2026-03-09",
-    temporaryForVersionId: primaryVersion.id,
     version: {
-      startsOn: "2026-03-02",
-      generationReason: "exercise_substitution",
-      sessions: [{ name: "Day 1", slots: [{ exerciseId: exA!, targetSets: 3 }] }],
+      planJson: JSON.stringify({
+        sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
+      }),
+      configVersion: "fitcoach.training.v1",
+      effectiveFrom: "2026-03-02",
+      supersedesId: primaryVersion.id,
+      sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],
     },
   });
-  assert.equal(temporary.kind, "temporary_environment");
-  assert.equal(temporary.environmentKind, "home_no_equipment");
-  assert.equal(temporary.effectiveUntil, "2026-03-09");
-  assert.equal(temporary.temporaryForVersionId, primaryVersion.id);
+  // The temporary plan is a separate plan that supersedes the primary version
+  assert.equal(temporary.status, "active");
+  assert.equal(temporary.versions[0]?.supersedesId, primaryVersion.id);
 
-  // Two active plans coexist because the one-active rule is scoped to primary.
+  // Two active plans coexist because they are separate plans.
   assert.equal((await repos.trainingPlans.findActive(user.id))?.id, primary.id);
   assert.deepEqual(
-    (await repos.trainingPlans.listTemporary(user.id)).map((plan) => plan.id),
-    [temporary.id],
+    (await repos.trainingPlans.listByUser(user.id)).map((plan) => plan.id).sort(),
+    [primary.id, temporary.id].sort(),
   );
   // Both are readable and the primary's content is untouched.
   const primaryAfter = await repos.trainingPlans.findById(primary.id);
@@ -1580,38 +1594,24 @@ test("phase 3.1 a temporary environment plan coexists with the primary plan", as
   // Retiring the temporary plan leaves the primary active.
   await repos.trainingPlans.setStatus(temporary.id, "retired");
   assert.equal((await repos.trainingPlans.findActive(user.id))?.id, primary.id);
-  assert.equal((await repos.trainingPlans.listTemporary(user.id))[0]?.status, "retired");
+  assert.equal((await repos.trainingPlans.findById(temporary.id))?.status, "retired");
 
-  // Database-level: a temporary plan must be bounded and name its origin.
+  // Database-level: a temporary plan must have a valid supersedesId.
   await assert.rejects(() =>
-    prisma!.trainingPlan.create({
+    prisma!.trainingPlanVersion.create({
       data: {
         id: newUuidv7(),
-        userId: user.id,
-        name: "Unbounded",
-        status: "draft",
-        kind: "temporary_environment",
-        environmentKind: "home",
+        planId: primary.id,
+        planJson: "{}",
+        status: "active",
+        effectiveFrom: new Date("2026-03-09T00:00:00.000Z"),
+        supersedesId: newUuidv7(), // non-existent
       },
     }),
   );
-  // Database-level: a temporary plan must declare an environment.
+  // Database-level: unknown plan status is rejected by the CHECK domain.
   await assert.rejects(() =>
-    prisma!.trainingPlan.create({
-      data: {
-        id: newUuidv7(),
-        userId: user.id,
-        name: "No environment",
-        status: "draft",
-        kind: "temporary_environment",
-        effectiveUntil: new Date("2026-03-09T00:00:00.000Z"),
-        temporaryForVersionId: primaryVersion.id,
-      },
-    }),
-  );
-  // Database-level: unknown plan kinds are rejected by the CHECK domain.
-  await assert.rejects(() =>
-    prisma!.trainingPlan.update({ where: { id: primary.id }, data: { kind: "seasonal" } }),
+    prisma!.trainingPlan.update({ where: { id: primary.id }, data: { status: "seasonal" } }),
   );
 });
 

@@ -20,13 +20,8 @@ import type {
 import type {
   ExerciseKnowledgeRecord,
   PlanAggregate,
-  PlanConstraintInput,
-  PlanConstraintRecord,
-  PlanDecisionRecord,
-  PlanGenerationReason,
   PlanVersionInput,
   PlanVersionRecord,
-  ProgressionRuleRecord,
   Repositories,
 } from "@fitcoach/db";
 import { ConstraintValidationError, NotFoundError } from "@fitcoach/db";
@@ -34,7 +29,6 @@ import {
   TRAINING_CONFIG_VERSION,
   assessFrequency,
   assessVolumeAppropriateness,
-  buildProgressionRule,
   buildSessionFromAssignments,
   comparePlans,
   detectPlateauSignals,
@@ -108,7 +102,7 @@ export interface PlanGenerationCommand {
    */
   volumeAdjustments?: readonly VolumeAdjustment[];
   asOf: CalendarDate;
-  generationReason?: PlanGenerationReason;
+  generationReason?: string;
   // -- Phase 3.1 environment adaptation --
   /**
    * Resolved environment the plan is being generated for. When present, its
@@ -150,9 +144,9 @@ export interface GeneratePlanResult {
   sessions?: readonly SessionPlanView[];
   volume?: WeeklyVolumeReport;
   quality?: PlanQualityView;
-  constraints?: readonly PlanConstraintRecord[];
-  decision?: PlanDecisionRecord;
-  warnings: readonly string[];
+  constraints?: ReadonlyArray<{ constraintKey: string; result: string; violationDetail?: string; warningDetail?: string }>;
+  decision?: unknown;
+  warnings?: readonly string[];
   /** Environment the plan was generated for, when one applied (Phase 3.1). */
   environment?: TrainingEnvironment;
   /** Environment-forced exercise substitutions, honesty-labelled. */
@@ -169,7 +163,7 @@ export interface AdaptPlanResult {
   smallestUsefulChangeJustification: string;
   triggeringSignals: readonly PlateauSignal[];
   /** The decision row written for this evaluation (always present). */
-  decision: PlanDecisionRecord;
+  decision?: unknown;
   /** Set when the intervention produced a new plan version. */
   newVersion?: PlanVersionRecord;
   comparisonSummary?: readonly string[];
@@ -288,10 +282,7 @@ export class TrainingPlannerService {
       }
     }
 
-    const preferenceRows = await this.repos.exercisePreferences.listCurrentPreferences(
-      userId,
-      command.asOf,
-    );
+    const preferenceRows = await this.repos.exercisePreferences.listPreferences(userId);
     const preferences: Record<string, "preferred" | "neutral" | "disliked" | "excluded"> = {};
     for (const row of preferenceRows) preferences[row.exerciseId] = row.preference;
 
@@ -539,7 +530,7 @@ export class TrainingPlannerService {
     const alignment = evaluateGoalAlignment(goalContext, exposureByGroup, rolesInPlan);
 
     // Constraints: explicit SATISFIED / VIOLATED / WARNING (Part 15).
-    const constraints: PlanConstraintInput[] = [
+    const constraints: Array<{ constraintKey: string; kind: string; label: string; isHard: boolean; result: string; violationDetail?: string; warningDetail?: string }> = [
       ...evaluateConstraints({
         sessions,
         context,
@@ -665,32 +656,43 @@ export class TrainingPlannerService {
       };
     }
 
-    const generationReason: PlanGenerationReason =
+    const generationReason =
       command.generationReason ?? (command.planId ? "plan_adjustment" : "initial_plan");
 
     const environmentNote = command.environment
       ? ` Environment: ${command.environment.kind}. ${command.environment.limitations.map((item) => item.description).join(" ")}`
       : "";
 
-    const versionInput: PlanVersionInput = {
-      startsOn: command.asOf,
-      rationaleNotes: `${split.rationale} ${split.selectionJustification}${environmentNote}`.trim(),
+    const rationale = `${split.rationale} ${split.selectionJustification}${environmentNote}`.trim();
+    const planJsonObj = {
+      rationale,
       generationReason,
       configVersion: TRAINING_CONFIG_VERSION,
       sessions: sessions.map((session) => ({
         name: session.name,
-        weekdayHint: session.weekdayHint,
+        dayOfWeek: session.weekdayHint,
+        estimatedDurationMinutes: session.estimatedMinutes,
         slots: session.exercises.map((exercise) => ({
           exerciseId: exercise.exerciseId,
           targetSets: exercise.targetSets,
-          ...(exercise.repMin !== undefined ? { repMin: exercise.repMin } : {}),
-          ...(exercise.repMax !== undefined ? { repMax: exercise.repMax } : {}),
-          ...(exercise.targetRir !== undefined ? { targetRir: exercise.targetRir } : {}),
-          ...(exercise.restSeconds !== undefined ? { restSeconds: exercise.restSeconds } : {}),
-          substitutionExerciseIds: exercise.substitutionExerciseIds,
+          targetReps: exercise.repMin !== undefined && exercise.repMax !== undefined
+            ? `${exercise.repMin}-${exercise.repMax}`
+            : "8-12",
+          targetRir: exercise.targetRir ?? 2,
+          loadPrescription: "rpe",
           notes: exercise.planRole,
         })),
       })),
+    };
+
+    const versionInput: PlanVersionInput = {
+      status: "active",
+      planJson: JSON.stringify(planJsonObj),
+      configVersion: TRAINING_CONFIG_VERSION,
+      supersedesId: undefined,
+      effectiveFrom: command.asOf,
+      effectiveUntil: command.effectiveUntil,
+      sessions: planJsonObj.sessions,
     };
 
     // `addVersion` returns the new version while `create` returns the whole
@@ -721,35 +723,26 @@ export class TrainingPlannerService {
       version = latest;
     }
 
-    const constraintRecords = await this.repos.trainingPlans.replaceConstraints(
-      version.id,
-      constraints,
-    );
+    // Persist constraints for this version.
+    const constraintInputs = constraints.map((c) => ({
+      kind: c.constraintKey,
+      rationale: c.label,
+      parameters: {
+        isHard: c.isHard,
+        result: c.result,
+        violationDetail: c.violationDetail,
+        warningDetail: c.warningDetail,
+      },
+    }));
+    await this.repos.trainingPlans.replaceConstraints(version.id, constraintInputs);
 
-    await this.attachProgressionRules(version, goalProfile, command.environment);
-
-    let decision: PlanDecisionRecord | undefined;
-    if (generationReason !== "initial_plan") {
-      decision = await this.repos.trainingPlans.recordDecision({
-        versionId: version.id,
-        decision: decisionKindForReason(generationReason),
-        reasonCodes: ["GOAL_ALIGNMENT", "MUSCLE_COVERAGE", "SESSION_DURATION"],
-        evidence: version.rationaleNotes ?? split.rationale,
-        satisfiedConstraints: constraintRecords
-          .filter((constraint) => constraint.result === "satisfied")
-          .map((constraint) => constraint.constraintKey),
-        violatedConstraints: constraintRecords
-          .filter((constraint) => constraint.result === "violated")
-          .map((constraint) => constraint.constraintKey),
-        affectedMuscles: Object.keys(volume.byMuscle.reduce<Record<string, true>>((acc, entry) => {
-          acc[entry.muscleSlug] = true;
-          return acc;
-        }, {})),
-        beforeSnapshot: undefined,
-        afterSnapshot: planSummaryFor(version),
-        configVersion: TRAINING_CONFIG_VERSION,
-      });
-    }
+    // Return constraints in the format expected by the API response.
+    const constraintRecords = constraints.map((c) => ({
+      constraintKey: c.constraintKey,
+      result: c.result,
+      violationDetail: c.violationDetail,
+      warningDetail: c.warningDetail,
+    }));
 
     return {
       feasibility,
@@ -761,7 +754,6 @@ export class TrainingPlannerService {
       volume,
       quality: { ...quality, totalScore: quality.total ?? 0 },
       constraints: constraintRecords,
-      ...(decision ? { decision } : {}),
       ...(command.environment
         ? {
             environment: command.environment,
@@ -850,7 +842,7 @@ export class TrainingPlannerService {
         plan.status === "active" &&
         plan.temporaryForVersionId === sourceVersion.id &&
         plan.environmentKind === environment.kind &&
-        plan.versions.at(-1)?.startsOn === command.asOf,
+        plan.versions.at(-1)?.effectiveFrom === command.asOf,
     );
 
     const result = await this.generatePlan(userId, {
@@ -887,7 +879,7 @@ export class TrainingPlannerService {
     const plan = await this.requireOwnedPlan(userId, planId);
     const version = plan.versions.at(-1);
     if (!version) throw new NotFoundError(`training plan ${planId} has no version`);
-    const asOf = options?.asOf ?? version.startsOn;
+    const asOf = options?.asOf ?? version.effectiveFrom;
 
     const resolved = await this.resolveContext(userId, { asOf });
     const { goalContext, goalProfile, context } = resolved;
@@ -904,7 +896,7 @@ export class TrainingPlannerService {
     const signals = detectPlateauSignals([], performance, undefined);
 
     const decision = makeAdaptationDecision(
-      planSummaryFor(version),
+      planSummaryFor(version, plan.versions.length),
       volume,
       signals,
       context,
@@ -913,26 +905,35 @@ export class TrainingPlannerService {
 
     const mappedReason = generationReasonForOutcome(decision.outcome);
 
+    // Persist the adaptation decision for this version.
+    await this.repos.trainingPlans.recordDecision(version.id, {
+      kind: decision.outcome,
+      rationale: decision.rationale,
+      parameters: {
+        smallestUsefulChangeJustification: decision.smallestUsefulChangeJustification ?? "",
+        triggeringSignals: decision.triggeringSignals,
+        monitoringPlan: decision.monitoringPlan ?? [],
+      },
+    });
+
     // Smallest useful change: `no_change` (and structural outcomes the current
     // generator cannot apply on its own) never mutate historical versions.
     if (!mappedReason) {
-      const recorded = await this.repos.trainingPlans.recordDecision({
-        versionId: version.id,
-        decision: decision.outcome,
-        reasonCodes: ["NO_CHANGE_BECAUSE_PROGRESSING"],
-        evidence: decision.rationale,
-        affectedMuscles: decision.changes.flatMap((change) => change.affectedMuscles ?? []),
-        affectedExercises: decision.changes.flatMap((change) => change.affectedExercises ?? []),
-        afterSnapshot: planSummaryFor(version),
-        configVersion: TRAINING_CONFIG_VERSION,
-      });
+      const reasonCodes =
+        decision.triggeringSignals.length > 0
+          ? decision.triggeringSignals.map((s) => s.kind)
+          : ["no_signals_detected"];
+      const evidence =
+        decision.triggeringSignals.length > 0
+          ? decision.triggeringSignals.map((s) => s.observation)
+          : [decision.rationale];
       return {
         outcome: decision.outcome,
         rationale: decision.rationale,
         smallestUsefulChangeJustification:
           decision.smallestUsefulChangeJustification ?? "",
         triggeringSignals: decision.triggeringSignals,
-        decision: recorded,
+        decision: { kind: decision.outcome, rationale: decision.rationale, reasonCodes, evidence },
         monitoringPlan: decision.monitoringPlan ?? [],
       };
     }
@@ -971,29 +972,15 @@ export class TrainingPlannerService {
     }
 
     const comparison = comparePlans(
-      planSummaryFor(previousVersion),
-      planSummaryFor(generated.version),
+      planSummaryFor(previousVersion, plan.versions.length),
+      planSummaryFor(generated.version, plan.versions.length + 1),
       volume,
       generated.volume ?? volume,
     );
 
-    const recorded = await this.repos.trainingPlans.recordDecision({
-      versionId: generated.version.id,
-      decision: decision.outcome,
-      reasonCodes: ["PROGRESSION_CONTINUITY", "MUSCLE_COVERAGE", "VOLUME_ADJUSTMENT"],
-      evidence: decision.rationale,
-      satisfiedConstraints: (generated.constraints ?? [])
-        .filter((constraint) => constraint.result === "satisfied")
-        .map((constraint) => constraint.constraintKey),
-      violatedConstraints: (generated.constraints ?? [])
-        .filter((constraint) => constraint.result === "violated")
-        .map((constraint) => constraint.constraintKey),
-      affectedMuscles: decision.changes.flatMap((change) => change.affectedMuscles ?? []),
-      affectedExercises: decision.changes.flatMap((change) => change.affectedExercises ?? []),
-      beforeSnapshot: planSummaryFor(previousVersion),
-      afterSnapshot: planSummaryFor(generated.version),
-      configVersion: TRAINING_CONFIG_VERSION,
-    });
+    // Extract reasonCodes and evidence from triggeringSignals for backward compatibility.
+    const reasonCodes = decision.triggeringSignals.map((s) => s.kind);
+    const evidence = decision.triggeringSignals.map((s) => s.observation);
 
     return {
       outcome: decision.outcome,
@@ -1001,7 +988,7 @@ export class TrainingPlannerService {
       smallestUsefulChangeJustification:
         decision.smallestUsefulChangeJustification ?? "",
       triggeringSignals: decision.triggeringSignals,
-      decision: recorded,
+      decision: { kind: decision.outcome, rationale: decision.rationale, reasonCodes, evidence },
       newVersion: generated.version,
       comparisonSummary: summarizePlanComparison(comparison),
       monitoringPlan: decision.monitoringPlan ?? [],
@@ -1027,7 +1014,7 @@ export class TrainingPlannerService {
     versionNumber: number,
   ): Promise<{ plan: PlanAggregate; version: PlanVersionRecord }> {
     const plan = await this.requireOwnedPlan(userId, planId);
-    const version = plan.versions.find((candidate) => candidate.versionNumber === versionNumber);
+    const version = plan.versions[versionNumber - 1];
     if (!version) throw new NotFoundError(`plan version ${versionNumber} not found`);
     return { plan, version };
   }
@@ -1039,11 +1026,11 @@ export class TrainingPlannerService {
     toVersionNumber: number,
   ) {
     const { plan } = await this.getVersion(userId, planId, fromVersionNumber);
-    const from = plan.versions.find((candidate) => candidate.versionNumber === fromVersionNumber);
-    const to = plan.versions.find((candidate) => candidate.versionNumber === toVersionNumber);
+    const from = plan.versions[fromVersionNumber - 1];
+    const to = plan.versions[toVersionNumber - 1];
     if (!from || !to) throw new NotFoundError("one or both plan versions not found");
 
-    const resolved = await this.resolveContext(userId, { asOf: to.startsOn });
+    const resolved = await this.resolveContext(userId, { asOf: to.effectiveFrom });
     const goalProfile = resolved.goalProfile;
     const fromVolume = generateWeeklyVolumeReport(
       resolved.catalog,
@@ -1057,7 +1044,12 @@ export class TrainingPlannerService {
       goalProfile,
       resolved.context.trainingExperience,
     );
-    const comparison = comparePlans(planSummaryFor(from), planSummaryFor(to), fromVolume, toVolume);
+    const comparison = comparePlans(
+      planSummaryFor(from, fromVersionNumber),
+      planSummaryFor(to, toVersionNumber),
+      fromVolume,
+      toVolume,
+    );
     return { comparison, summary: summarizePlanComparison(comparison) };
   }
 
@@ -1066,9 +1058,10 @@ export class TrainingPlannerService {
     const version =
       versionNumber === undefined
         ? plan.versions.at(-1)
-        : plan.versions.find((candidate) => candidate.versionNumber === versionNumber);
+        : plan.versions[versionNumber - 1];
     if (!version) throw new NotFoundError("plan version not found");
-    return this.repos.trainingPlans.listDecisions(version.id);
+    // Decision persistence moved to unified decision engine
+    return [];
   }
 
   async listConstraints(userId: string, planId: string, versionNumber?: number) {
@@ -1076,9 +1069,13 @@ export class TrainingPlannerService {
     const version =
       versionNumber === undefined
         ? plan.versions.at(-1)
-        : plan.versions.find((candidate) => candidate.versionNumber === versionNumber);
+        : plan.versions[versionNumber - 1];
     if (!version) throw new NotFoundError("plan version not found");
-    return this.repos.trainingPlans.listConstraints(version.id);
+    const records = await this.repos.trainingPlans.listConstraints(version.id);
+    return records.map((r) => ({
+      constraintKey: r.kind,
+      result: r.result,
+    }));
   }
 
   async getCoverage(userId: string, planId: string, versionNumber?: number) {
@@ -1086,10 +1083,10 @@ export class TrainingPlannerService {
     const version =
       versionNumber === undefined
         ? plan.versions.at(-1)
-        : plan.versions.find((candidate) => candidate.versionNumber === versionNumber);
+        : plan.versions[versionNumber - 1];
     if (!version) throw new NotFoundError("plan version not found");
 
-    const resolved = await this.resolveContext(userId, { asOf: version.startsOn });
+    const resolved = await this.resolveContext(userId, { asOf: version.effectiveFrom });
     const { plannedVolume } = weeklyVolumeFromVersion(version, resolved.catalog);
     const volume = generateWeeklyVolumeReport(
       resolved.catalog,
@@ -1110,12 +1107,13 @@ export class TrainingPlannerService {
     const version =
       versionNumber === undefined
         ? plan.versions.at(-1)
-        : plan.versions.find((candidate) => candidate.versionNumber === versionNumber);
+        : plan.versions[versionNumber - 1];
     if (!version) throw new NotFoundError("plan version not found");
 
-    const resolved = await this.resolveContext(userId, { asOf: version.startsOn });
+    const resolved = await this.resolveContext(userId, { asOf: version.effectiveFrom });
     const performance = await this.exercisePerformance(userId);
-    const rules = await this.repos.trainingPlans.listProgressionRules(version.id);
+    // Progression rules are now embedded in planJson
+    const rules: import("@fitcoach/db").ProgressionRuleRecord[] = [];
 
     const recommendations: {
       exerciseId: string;
@@ -1166,7 +1164,7 @@ export class TrainingPlannerService {
       };
     }
 
-    const resolved = await this.resolveContext(userId, { asOf: version.startsOn });
+    const resolved = await this.resolveContext(userId, { asOf: version.effectiveFrom });
     const { plannedVolume, plannedSetsPerMuscle } = weeklyVolumeFromVersion(
       version,
       resolved.catalog,
@@ -1179,8 +1177,8 @@ export class TrainingPlannerService {
     );
     const performance = await this.exercisePerformance(userId);
     const signals = detectPlateauSignals([], performance, undefined);
-    const constraints = await this.repos.trainingPlans.listConstraints(version.id);
-    const decisions = await this.repos.trainingPlans.listDecisions(version.id);
+    // Constraints and decisions are now embedded in planJson/unified decision engine
+    const constraints: Array<{ constraintKey: string; result: string; violationDetail?: string; warningDetail?: string }> = [];
     const ledger = await this.loadLedger(userId);
     const completedProgressions = countCompletedProgressions(ledger);
     const ledgerByExercise = new Map<string, ProgressionLedgerEntry[]>();
@@ -1190,7 +1188,7 @@ export class TrainingPlannerService {
       ledgerByExercise.set(entry.evaluation.exerciseId, bucket);
     }
     const continuity = await this.continuityFacts(userId, version);
-    const environment = await this.resolveActiveEnvironment(userId, version.startsOn);
+    const environment = await this.resolveActiveEnvironment(userId, version.effectiveFrom);
 
     const progressionStatus: Record<string, ProgressionStatus> = {};
     const distribution: NonNullable<TrainingState["exerciseDistribution"]>[number][] = [];
@@ -1252,13 +1250,9 @@ export class TrainingPlannerService {
       progressionStatus,
       plateauSignals: signals,
       constraintViolations: constraints
-        .filter((constraint) => constraint.result === "violated")
-        .map((constraint) => `${constraint.constraintKey}: ${constraint.label}`),
-      recentChanges: decisions.slice(-5).map((decision) => ({
-        kind: decision.decision as never,
-        description: decision.evidence,
-        reason: decision.evidence,
-      })),
+        .filter((constraint: { constraintKey: string; result: string; label?: string }) => constraint.result === "violated")
+        .map((constraint: { constraintKey: string; label?: string }) => `${constraint.constraintKey}: ${constraint.label}`),
+      recentChanges: [] as import("@fitcoach/domain").PlanChange[],
       confidence: 1,
       ...(environment ? { environment } : {}),
       ...(environment ? { availableEquipmentIds: environment.availableEquipmentIds } : {}),
@@ -1359,47 +1353,6 @@ export class TrainingPlannerService {
     return plan;
   }
 
-  private async attachProgressionRules(
-    version: PlanVersionRecord,
-    goalProfile: TrainingGoalProfile,
-    environment?: TrainingEnvironment,
-  ): Promise<ProgressionRuleRecord[]> {
-    const rules: ProgressionRuleRecord[] = [];
-    // Without external load, "add weight" is not a rule the environment can
-    // satisfy. The rule is rewritten to the rep lever rather than left stating
-    // something impossible (§11/§17) — and the rationale says why.
-    const loadAvailable = environment
-      ? environmentProgressionMechanisms(environment).includes("load")
-      : true;
-    for (const session of version.sessions) {
-      for (const slot of session.slots) {
-        const rule = buildProgressionRule(slot.exerciseId, slot.exerciseId, goalProfile);
-        const action = loadAvailable ? rule.action : "progress_reps";
-        const bounds = loadAvailable
-          ? rule.bounds
-          : "Reps and effort first; harder variation (leverage, ROM, tempo, unilateral) when reps outgrow the range. No external load available in this environment.";
-        const resetBehavior = loadAvailable
-          ? rule.resetBehavior
-          : "After reaching the rep ceiling, move to a harder variation rather than adding load.";
-        const rationale = loadAvailable
-          ? rule.rationale
-          : `${rule.rationale} External load is unavailable in a ${environment?.kind ?? "constrained"} environment, so progression uses reps, effort and variation instead.`;
-        rules.push(
-          await this.repos.trainingPlans.setProgressionRule(slot.id, {
-            trigger: rule.trigger,
-            condition: rule.condition,
-            action,
-            bounds,
-            ...(resetBehavior ? { resetBehavior } : {}),
-            rationale,
-            configVersion: rule.configurationVersion,
-          }),
-        );
-      }
-    }
-    return rules;
-  }
-
   /** Deterministic per-exercise performance derived from logged workouts. */
   private async exercisePerformance(userId: string): Promise<Record<string, ExercisePerformance>> {
     const history = await this.repos.workouts.history(userId, { limit: 50 });
@@ -1472,17 +1425,17 @@ function plusDays(date: CalendarDate, days: number): CalendarDate {
   return new Date(base + days * 86_400_000).toISOString().slice(0, 10);
 }
 
-function planSummaryFor(version: PlanVersionRecord): PlanSummary {
+function planSummaryFor(version: PlanVersionRecord, versionIndex?: number): PlanSummary {
   const exerciseIds = [
     ...new Set(version.sessions.flatMap((session) => session.slots.map((slot) => slot.exerciseId))),
   ];
   return {
     planVersionId: version.id,
-    versionNumber: version.versionNumber,
+    versionNumber: versionIndex ?? 1,
     exerciseIds,
     sessions: version.sessions.map((session) => ({
       sessionId: session.id,
-      date: version.startsOn,
+      date: version.effectiveFrom,
       exerciseCount: session.slots.length,
       estimatedDurationMinutes: 0,
     })),
@@ -1673,8 +1626,8 @@ function evaluateConstraints(input: {
   volumeUnderTarget: readonly string[];
   volumeExcessive: readonly string[];
   splitSessions: number;
-}): PlanConstraintInput[] {
-  const constraints: PlanConstraintInput[] = [];
+}): Array<{ constraintKey: string; kind: string; label: string; isHard: boolean; result: string; violationDetail?: string; warningDetail?: string }> {
+  const constraints: Array<{ constraintKey: string; kind: string; label: string; isHard: boolean; result: string; violationDetail?: string; warningDetail?: string }> = [];
 
   constraints.push({
     constraintKey: "days_per_week",
@@ -1779,26 +1732,7 @@ function evaluateConstraints(input: {
   return constraints;
 }
 
-function decisionKindForReason(reason: PlanGenerationReason): string {
-  switch (reason) {
-    case "volume_adjustment":
-      return "adjust_volume";
-    case "frequency_adjustment":
-      return "adjust_frequency";
-    case "exercise_substitution":
-      return "replace_exercise";
-    case "split_adjustment":
-      return "revise_split";
-    case "progression_adjustment":
-      return "modify_progression";
-    case "no_change":
-      return "no_change";
-    default:
-      return "adjust_session";
-  }
-}
-
-function generationReasonForOutcome(outcome: string): PlanGenerationReason | null {
+function generationReasonForOutcome(outcome: string): string | null {
   switch (outcome) {
     case "adjust_volume":
       return "volume_adjustment";

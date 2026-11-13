@@ -6,6 +6,7 @@
     { "path": "packages/nutrition" },
     { "path": "packages/db" },
     { "path": "packages/ai" },
+    { "path": "packages/supabase" },
     { "path": "apps/api" }
   ]
 }

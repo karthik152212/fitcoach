@@ -18,3 +18,5 @@ export { startTestPostgres, migrateDeploy } from "./testing/postgres";
 export type { TestPostgres } from "./testing/postgres";
 export { seedDatabase, SEED_FIXTURE_LABEL } from "./seed/seed";
 export type { SeedResult } from "./seed/seed";
+export { withUserTransaction, runDb } from "./repositories/util";
+export type { TransactionClient } from "./repositories/util";

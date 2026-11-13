@@ -22,7 +22,14 @@
  *    result. Unverifiable statements are user-facing prose only and must not
  *    be persisted as data.
  */
-import type { Diagnosis, Intervention, Recommendation } from "@fitcoach/domain";
+
+export * from "./contracts";
+export * from "./provider";
+export * from "./mockProvider";
+export * from "./anthropicProvider";
+export * from "./openaiProvider";
+export * from "./evidence";
+export * from "./contextSources";
 
 export const AI_PACKAGE_STATUS = "boundary-only" as const;
 
@@ -47,7 +54,7 @@ export interface ParsedFoodLogCandidate {
  */
 export interface AiCoordinatorPort {
   parseFoodLog(rawText: string): Promise<ParsedFoodLogCandidate>;
-  explainDiagnosis(diagnosis: Diagnosis): Promise<string>;
-  explainIntervention(intervention: Intervention): Promise<string>;
-  presentRecommendation(recommendation: Recommendation): Promise<string>;
+  explainDiagnosis(diagnosis: import("@fitcoach/domain").Diagnosis): Promise<string>;
+  explainIntervention(intervention: import("@fitcoach/domain").Intervention): Promise<string>;
+  presentRecommendation(recommendation: import("@fitcoach/domain").Recommendation): Promise<string>;
 }

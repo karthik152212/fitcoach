@@ -193,6 +193,7 @@ export async function seedDatabase(prisma: PrismaClient): Promise<SeedResult> {
       if (!sameContent) {
         await repos.knowledge.upsertFormVersion({
           exerciseId: record.id,
+          version: existingVersion.version + 1,
           status: "active",
           effectiveFrom: SEED_EFFECTIVE_FROM,
           reviewNotes: "Form guidance revised by review; published as a new version.",
@@ -205,41 +206,34 @@ export async function seedDatabase(prisma: PrismaClient): Promise<SeedResult> {
     for (const media of exercise.media ?? defaultMediaFor(exercise)) {
       await repos.knowledge.upsertMediaAsset({
         exerciseId: record.id,
-        mediaType: media.mediaType,
+        type: media.mediaType,
         angle: media.angle,
-        storageKey: media.storageKey,
-        durationSeconds: media.durationSeconds,
-        overlays: media.overlays,
-        status: media.status ?? "active",
-        effectiveFrom: SEED_EFFECTIVE_FROM,
+        url: media.storageKey,
+        caption: undefined,
+        isActive: (media.status ?? "active") === "active",
+        externalSourceId: undefined,
       });
       mediaAssets += 1;
     }
   }
 
-  const exerciseBySlug = new Map(
-    (await repos.exercises.listExercises({ includeInactive: true })).map((item) => [
-      item.slug,
-      item.id,
-    ]),
-  );
-
-  for (const substitution of KNOWLEDGE_SUBSTITUTIONS) {
-    const exerciseId = exerciseBySlug.get(substitution.exercise);
-    const substituteId = exerciseBySlug.get(substitution.substitute);
-    if (!exerciseId || !substituteId) {
-      throw new Error(
-        `seed invariant: substitution ${substitution.exercise} -> ${substitution.substitute} references a missing exercise`,
-      );
-    }
-    await repos.knowledge.upsertSubstitution({
-      exerciseId,
-      substituteExerciseId: substituteId,
-      trigger: substitution.trigger,
-      reason: substitution.reason,
-      rankHint: substitution.rankHint ?? 0,
-    });
-  }
+  // Substitutions are handled at domain level in fitness-core; no persistence layer yet.
+  // for (const substitution of KNOWLEDGE_SUBSTITUTIONS) {
+  //   const exerciseId = exerciseBySlug.get(substitution.exercise);
+  //   const substituteId = exerciseBySlug.get(substitution.substitute);
+  //   if (!exerciseId || !substituteId) {
+  //     throw new Error(
+  //       `seed invariant: substitution ${substitution.exercise} -> ${substitution.substitute} references a missing exercise`,
+  //     );
+  //   }
+  //   await repos.knowledge.upsertSubstitution({
+  //     exerciseId,
+  //     substituteExerciseId: substituteId,
+  //     trigger: substitution.trigger,
+  //     reason: substitution.reason,
+  //     rankHint: substitution.rankHint ?? 0,
+  //   });
+  // }
 
   // Food source + fixture foods (first-party, hand-written values).
   await prisma.foodSource.upsert({

@@ -4,11 +4,17 @@ import type {
   PerformanceObservationSummary,
   ProgressionActualChange,
   Profile,
+  DecisionSnapshotStatus,
 } from "@fitcoach/domain";
+import type { IntentClassification } from "@fitcoach/ai";
+import type { PlanVersionInput } from "@fitcoach/db";
 import { buildExampleUser, createUserSummary } from "./example";
 import type { AppServices } from "./services";
 import type { Router } from "./http";
 import { RouteError } from "./http";
+import type { RouteHandler, RouteContext } from "./http";
+import { CoachingError, type CoachingRequest } from "./services/aiCoaching/orchestrator";
+import { authMiddleware } from "./services/authMiddleware";
 import {
   asObject,
   optionalBoolean,
@@ -25,6 +31,7 @@ import {
   requiredEnum,
   requiredNumber,
   requiredString,
+  requiredStringArray,
   requiredUuid,
 } from "./validation";
 
@@ -67,6 +74,15 @@ const ACTIVITY_KINDS = [
   "sport",
   "other",
 ] as const;
+
+const OBSERVATION_ORIGINS = [
+  "wearable",
+  "manual",
+  "phone",
+  "partner_api",
+  "other",
+] as const;
+const CONFIDENCE_VALUES_ACTIVITY = ["high", "medium", "low"] as const;
 const EFFORT_LEVELS = ["low", "moderate", "high"] as const;
 const SEVERITIES = ["informational", "watch", "act", "urgent"] as const;
 const DIAGNOSIS_STATUSES = ["open", "monitoring", "resolved", "dismissed"] as const;
@@ -158,6 +174,10 @@ const BODY_SITES = [
   "right_calf",
 ] as const;
 
+// --- Barcode Scanner -----------------------------------------------------------
+
+const BARCODE_PATTERN = /^[0-9]{8,14}$/; // EAN-8, EAN-13, UPC-A, UPC-E
+
 /**
  * Project query parameters onto a plain object so the shared validation helpers
  * can be reused for GET requests. List-shaped parameters (any key ending in
@@ -185,6 +205,32 @@ function queryNumber(query: URLSearchParams, key: string, min: number, max: numb
     throw new RouteError(400, "validation_failed", `query parameter ${key} must be a number in [${min}, ${max}]`);
   }
   return value;
+}
+
+function queryToObject(query: URLSearchParams): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  query.forEach((value, key) => {
+    obj[key] = value;
+  });
+  return obj;
+}
+
+/**
+ * Wrap a coaching route handler so CoachingError (4xx ownership/validation
+ * failures) becomes a RouteError and reaches the client as a proper
+ * HTTP error envelope rather than a 500.
+ */
+function coachingHandler(handler: RouteHandler): RouteHandler {
+  return async (context: RouteContext) => {
+    try {
+      return await handler(context);
+    } catch (error) {
+      if (error instanceof CoachingError) {
+        throw new RouteError(error.status, error.code, error.message);
+      }
+      throw error;
+    }
+  };
 }
 
 function queryDate(query: URLSearchParams, key: string): string | undefined {
@@ -283,21 +329,73 @@ export function registerExampleRoutes(router: Router): void {
 
 export function registerRoutes(router: Router, services: AppServices): void {
   // -------------------------------------------------------------------------
-  // Users
+  // Auth (Supabase Auth)
+  // -------------------------------------------------------------------------
+  router.add("POST", "/v0/auth/signup", async ({ body }) => {
+    const email = requiredString(body, "email", { maxLength: 320 });
+    const password = requiredString(body, "password", { minLength: 8, maxLength: 128 });
+    const result = await services.auth.signUp({ email, password });
+    if (result.error) throw new RouteError(400, "signup_failed", result.error);
+    return { status: 201, body: { user: result.user, session: result.session } };
+  });
+
+  router.add("POST", "/v0/auth/signin", async ({ body }) => {
+    const email = requiredString(body, "email", { maxLength: 320 });
+    const password = requiredString(body, "password", { minLength: 8, maxLength: 128 });
+    const result = await services.auth.signIn({ email, password });
+    if (result.error) throw new RouteError(401, "signin_failed", result.error);
+    return { body: { user: result.user, session: result.session } };
+  });
+
+  router.add("POST", "/v0/auth/signout", authMiddleware(async ({ accessToken }) => {
+    const result = await services.auth.signOut(accessToken);
+    if (result.error) throw new RouteError(400, "signout_failed", result.error);
+    return { body: { success: true } };
+  }));
+
+  router.add("POST", "/v0/auth/refresh", async ({ body }) => {
+    const refreshToken = requiredString(body, "refreshToken");
+    const result = await services.auth.refreshSession(refreshToken);
+    if (result.error) throw new RouteError(401, "refresh_failed", result.error);
+    return { body: { user: result.user, session: result.session } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Health & Observability
+  // -------------------------------------------------------------------------
+  router.add("GET", "/healthz", () => ({ body: { status: "ok" } }));
+
+  router.add("GET", "/ready", async () => {
+    const result = await services.health.runChecks();
+    const status = result.status === "healthy" ? 200 : result.status === "degraded" ? 200 : 503;
+    return { status, body: result };
+  });
+
+  router.add("GET", "/live", () => {
+    const result = services.health.liveness();
+    return { body: result };
+  });
+
+  router.add("GET", "/v0/auth/me", authMiddleware(async ({ userId, userEmail }) => {
+    const user = await services.users.get(userId);
+    return { body: { user: { ...user, email: userEmail } } };
+  }));
+
+  // -------------------------------------------------------------------------
+  // Users (legacy - will require auth in future)
   // -------------------------------------------------------------------------
   router.add("POST", "/v0/users", async ({ body }) => {
     const email = optionalString(body, "email", { maxLength: 320 });
     const displayName = optionalString(body, "displayName", { maxLength: 200 });
     const timezone = optionalString(body, "timezone", { maxLength: 100 });
+    const result = await services.users.create({
+      ...(email !== undefined ? { email } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+      ...(timezone !== undefined ? { timezone } : {}),
+    });
     return {
-      status: 201,
-      body: {
-        user: await services.users.create({
-          ...(email !== undefined ? { email } : {}),
-          ...(displayName !== undefined ? { displayName } : {}),
-          ...(timezone !== undefined ? { timezone } : {}),
-        }),
-      },
+      status: result.created ? 201 : 200,
+      body: { user: result.user },
     };
   });
 
@@ -402,6 +500,11 @@ export function registerRoutes(router: Router, services: AppServices): void {
   // -------------------------------------------------------------------------
   // Equipment
   // -------------------------------------------------------------------------
+  // Equipment catalog (read-only Phase 2 knowledge, used by onboarding).
+  router.add("GET", "/v0/equipment", async () => ({
+    body: { equipment: await services.equipment.catalog() },
+  }));
+
   router.add("POST", "/v0/users/:userId/equipment", async ({ params, body }) => {
     const userId = params["userId"]!;
     const equipmentId = requiredUuid(body, "equipmentId");
@@ -490,106 +593,81 @@ export function registerRoutes(router: Router, services: AppServices): void {
   // -------------------------------------------------------------------------
   // Training plans
   // -------------------------------------------------------------------------
-  function parsePlanVersion(body: Record<string, unknown>): {
-    startsOn: string;
-    endsOn?: string;
-    rationaleNotes?: string;
-    sessions: Array<{
-      name: string;
-      weekdayHint?: number;
-      slots: Array<{
-        exerciseId: string;
-        targetSets?: number;
-        repMin?: number;
-        repMax?: number;
-        targetRir?: number;
-        restSeconds?: number;
-        substitutionExerciseIds?: string[];
-        notes?: string;
-      }>;
-    }>;
-  } {
-    const startsOn = requiredDate(body, "startsOn");
-    const endsOn = optionalDate(body, "endsOn");
-    const rationaleNotes = optionalString(body, "rationaleNotes", { maxLength: 2000 });
+  function parsePlanVersion(body: Record<string, unknown>): PlanVersionInput {
+    const status = optionalEnum(body, "status", ["active", "superseded", "draft"]);
+    const configVersion = optionalString(body, "configVersion", { maxLength: 100 });
+    const supersedesId = optionalUuid(body, "supersedesId");
+    const effectiveFrom = requiredDate(body, "effectiveFrom");
+    const effectiveUntil = optionalDate(body, "effectiveUntil");
     const sessionsRaw = optionalObjectArray(body, "sessions", { maxItems: 21 });
-    const sessions = (sessionsRaw ?? []).map((session, index) => {
-      const name = requiredString(session, `sessions[${index}].name`, { maxLength: 200 });
-      const weekdayHint = optionalNumber(session, `sessions[${index}].weekdayHint`, {
-        min: 0,
-        max: 6,
-        integer: true,
-      });
-      const slotsRaw = optionalObjectArray(session, `sessions[${index}].slots`, { maxItems: 30 });
-      if (!slotsRaw || slotsRaw.length === 0) {
-        throw new RouteError(400, "validation_failed", `sessions[${index}].slots must be a non-empty array`);
-      }
-      const slots = slotsRaw.map((slot, slotIndex) => {
-        const exerciseId = requiredUuid(slot, `sessions[${index}].slots[${slotIndex}].exerciseId`);
-        const targetSets = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].targetSets`, {
-          min: 1,
-          max: 100,
+
+    // Build planJson from sessions
+    const planJsonObj = {
+      sessions: (sessionsRaw ?? []).map((session, index) => {
+        const name = requiredString(session, `sessions[${index}].name`, { maxLength: 200 });
+        const dayOfWeek = optionalNumber(session, `sessions[${index}].dayOfWeek`, {
+          min: 0,
+          max: 6,
           integer: true,
         });
-        const repMin = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].repMin`, {
-          min: 0,
-          max: 1000,
-          integer: true,
-        });
-        const repMax = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].repMax`, {
-          min: 0,
-          max: 1000,
-          integer: true,
-        });
-        if (repMin !== undefined && repMax !== undefined && repMin > repMax) {
-          throw new RouteError(400, "validation_failed", `sessions[${index}].slots[${slotIndex}].repMin must be <= repMax`);
-        }
-        const targetRir = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].targetRir`, {
-          min: 0,
-          max: 10,
-        });
-        const restSeconds = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].restSeconds`, {
+        const notes = optionalString(session, `sessions[${index}].notes`, { maxLength: 2000 });
+        const estimatedDurationMinutes = optionalNumber(session, `sessions[${index}].estimatedDurationMinutes`, {
           min: 0,
           max: 7200,
           integer: true,
         });
-        const substitutionExerciseIds = optionalStringArray(
-          slot,
-          `sessions[${index}].slots[${slotIndex}].substitutionExerciseIds`,
-          { maxItems: 20 },
-        );
-        if (substitutionExerciseIds) {
-          for (const id of substitutionExerciseIds) {
-            if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
-              throw new RouteError(400, "validation_failed", "substitution ids must be UUIDs");
-            }
-          }
+        const slotsRaw = optionalObjectArray(session, `sessions[${index}].slots`, { maxItems: 30 });
+        if (!slotsRaw || slotsRaw.length === 0) {
+          throw new RouteError(400, "validation_failed", `sessions[${index}].slots must be a non-empty array`);
         }
-        const notes = optionalString(slot, `sessions[${index}].slots[${slotIndex}].notes`, {
-          maxLength: 2000,
+        const slots = slotsRaw.map((slot, slotIndex) => {
+          const exerciseId = requiredUuid(slot, `sessions[${index}].slots[${slotIndex}].exerciseId`);
+          const targetSets = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].targetSets`, {
+            min: 1,
+            max: 100,
+            integer: true,
+          });
+          const targetReps = optionalString(slot, `sessions[${index}].slots[${slotIndex}].targetReps`, { maxLength: 20 });
+          const targetRir = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].targetRir`, {
+            min: 0,
+            max: 10,
+          });
+          const loadPrescription = optionalString(slot, `sessions[${index}].slots[${slotIndex}].loadPrescription`, { maxLength: 20 });
+          const loadValue = optionalNumber(slot, `sessions[${index}].slots[${slotIndex}].loadValue`, {
+            min: 0,
+            max: 1000,
+          });
+          const notes = optionalString(slot, `sessions[${index}].slots[${slotIndex}].notes`, {
+            maxLength: 2000,
+          });
+          return {
+            exerciseId,
+            ...(targetSets !== undefined ? { targetSets } : {}),
+            ...(targetReps !== undefined ? { targetReps } : {}),
+            ...(targetRir !== undefined ? { targetRir } : {}),
+            ...(loadPrescription !== undefined ? { loadPrescription } : {}),
+            ...(loadValue !== undefined ? { loadValue } : {}),
+            ...(notes !== undefined ? { notes } : {}),
+          };
         });
         return {
-          exerciseId,
-          ...(targetSets !== undefined ? { targetSets } : {}),
-          ...(repMin !== undefined ? { repMin } : {}),
-          ...(repMax !== undefined ? { repMax } : {}),
-          ...(targetRir !== undefined ? { targetRir } : {}),
-          ...(restSeconds !== undefined ? { restSeconds } : {}),
-          ...(substitutionExerciseIds ? { substitutionExerciseIds } : {}),
+          name,
+          dayOfWeek: dayOfWeek ?? 0,
           ...(notes !== undefined ? { notes } : {}),
+          ...(estimatedDurationMinutes !== undefined ? { estimatedDurationMinutes } : {}),
+          slots,
         };
-      });
-      return {
-        name,
-        ...(weekdayHint !== undefined ? { weekdayHint } : {}),
-        slots,
-      };
-    });
+      }),
+    };
+
     return {
-      startsOn,
-      ...(endsOn !== undefined ? { endsOn } : {}),
-      ...(rationaleNotes !== undefined ? { rationaleNotes } : {}),
-      sessions,
+      status: status ?? "active",
+      planJson: JSON.stringify(planJsonObj),
+      configVersion,
+      supersedesId,
+      effectiveFrom,
+      effectiveUntil,
+      sessions: planJsonObj.sessions,
     };
   }
 
@@ -1227,6 +1305,157 @@ export function registerRoutes(router: Router, services: AppServices): void {
   });
 
   // -------------------------------------------------------------------------
+  // Sleep
+  // -------------------------------------------------------------------------
+  router.add("POST", "/v0/users/:userId/sleep", async ({ params, body }) => {
+    const userId = params["userId"]!;
+    const date = optionalDate(body, "date");
+    const startedAt = requiredString(body, "startedAt", { maxLength: 50 });
+    const endedAt = requiredString(body, "endedAt", { maxLength: 50 });
+    const timeInBedMinutes = optionalNumber(body, "timeInBedMinutes", { min: 0, max: 1440, integer: true });
+    const asleepMinutes = optionalNumber(body, "asleepMinutes", { min: 0, max: 1440, integer: true });
+    const efficiency = optionalNumber(body, "efficiency", { min: 0, max: 100 });
+    const latencyMinutes = optionalNumber(body, "latencyMinutes", { min: 0, max: 1440, integer: true });
+    const deepMinutes = optionalNumber(body, "deepMinutes", { min: 0, max: 1440, integer: true });
+    const remMinutes = optionalNumber(body, "remMinutes", { min: 0, max: 1440, integer: true });
+    const lightMinutes = optionalNumber(body, "lightMinutes", { min: 0, max: 1440, integer: true });
+    const awakeMinutes = optionalNumber(body, "awakeMinutes", { min: 0, max: 1440, integer: true });
+    const awakenings = optionalNumber(body, "awakenings", { min: 0, max: 100, integer: true });
+    const source = requiredString(body, "source", { maxLength: 200 });
+    const origin = optionalEnum(body, "origin", OBSERVATION_ORIGINS);
+    const externalId = optionalString(body, "externalId", { maxLength: 500 });
+    const confidence = requiredEnum(body, "confidence", CONFIDENCE_VALUES_ACTIVITY);
+    const notes = optionalString(body, "notes", { maxLength: 4000 });
+
+    const record = await services.sleep.record(userId, {
+      ...(date !== undefined ? { date } : {}),
+      startedAt,
+      endedAt,
+      ...(timeInBedMinutes !== undefined ? { timeInBedMinutes } : {}),
+      ...(asleepMinutes !== undefined ? { asleepMinutes } : {}),
+      ...(efficiency !== undefined ? { efficiency } : {}),
+      ...(latencyMinutes !== undefined ? { latencyMinutes } : {}),
+      ...(deepMinutes !== undefined ? { deepMinutes } : {}),
+      ...(remMinutes !== undefined ? { remMinutes } : {}),
+      ...(lightMinutes !== undefined ? { lightMinutes } : {}),
+      ...(awakeMinutes !== undefined ? { awakeMinutes } : {}),
+      ...(awakenings !== undefined ? { awakenings } : {}),
+      source,
+      ...(origin ? { origin } : {}),
+      ...(externalId !== undefined ? { externalId } : {}),
+      confidence,
+      ...(notes !== undefined ? { notes } : {}),
+    });
+    return { status: 201, body: { sleep: record } };
+  });
+
+  router.add("GET", "/v0/users/:userId/sleep", async ({ params, query }) => {
+    const limit = queryNumber(query, "limit", 1, 500);
+    const from = queryCalendarDate(query, "from");
+    const to = queryCalendarDate(query, "to");
+    const origin = queryEnum(query, "origin", OBSERVATION_ORIGINS);
+    const history = await services.sleep.history(params["userId"]!, {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(from !== undefined ? { from } : {}),
+      ...(to !== undefined ? { to } : {}),
+      ...(origin ? { origin } : {}),
+    });
+    return { body: { sleep: history } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Recovery Indicators
+  // -------------------------------------------------------------------------
+  router.add("POST", "/v0/users/:userId/recovery/indicators", async ({ params, body }) => {
+    const userId = params["userId"]!;
+    const date = optionalDate(body, "date");
+    const hrvMs = optionalNumber(body, "hrvMs", { min: 0, max: 500 });
+    const restingHeartRateBpm = optionalNumber(body, "restingHeartRateBpm", { min: 20, max: 150, integer: true });
+    const sleepScore = optionalNumber(body, "sleepScore", { min: 0, max: 100 });
+    const readinessScore = optionalNumber(body, "readinessScore", { min: 0, max: 100 });
+    const muscleSoreness = optionalNumber(body, "muscleSoreness", { min: 0, max: 10 });
+    const fatigue = optionalNumber(body, "fatigue", { min: 0, max: 10 });
+    const sleepQuality = optionalNumber(body, "sleepQuality", { min: 0, max: 10 });
+    const readinessSubjective = optionalNumber(body, "readinessSubjective", { min: 0, max: 10 });
+    const source = requiredString(body, "source", { maxLength: 200 });
+    const origin = optionalEnum(body, "origin", OBSERVATION_ORIGINS);
+    const externalId = optionalString(body, "externalId", { maxLength: 500 });
+    const confidence = requiredEnum(body, "confidence", CONFIDENCE_VALUES_ACTIVITY);
+    const notes = optionalString(body, "notes", { maxLength: 4000 });
+
+    const record = await services.recovery.record(userId, {
+      ...(date !== undefined ? { date } : {}),
+      ...(hrvMs !== undefined ? { hrvMs } : {}),
+      ...(restingHeartRateBpm !== undefined ? { restingHeartRateBpm } : {}),
+      ...(sleepScore !== undefined ? { sleepScore } : {}),
+      ...(readinessScore !== undefined ? { readinessScore } : {}),
+      ...(muscleSoreness !== undefined ? { muscleSoreness } : {}),
+      ...(fatigue !== undefined ? { fatigue } : {}),
+      ...(sleepQuality !== undefined ? { sleepQuality } : {}),
+      ...(readinessSubjective !== undefined ? { readinessSubjective } : {}),
+      source,
+      ...(origin ? { origin } : {}),
+      ...(externalId !== undefined ? { externalId } : {}),
+      confidence,
+      ...(notes !== undefined ? { notes } : {}),
+    });
+    return { status: 201, body: { indicator: record } };
+  });
+
+  router.add("GET", "/v0/users/:userId/recovery/indicators", async ({ params, query }) => {
+    const limit = queryNumber(query, "limit", 1, 500);
+    const from = queryCalendarDate(query, "from");
+    const to = queryCalendarDate(query, "to");
+    const origin = queryEnum(query, "origin", OBSERVATION_ORIGINS);
+    const history = await services.recovery.history(params["userId"]!, {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(from !== undefined ? { from } : {}),
+      ...(to !== undefined ? { to } : {}),
+      ...(origin ? { origin } : {}),
+    });
+    return { body: { indicators: history } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Activity Intelligence (derived state)
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/users/:userId/activity/daily", async ({ params, query }) => {
+    const userId = params["userId"]!;
+    const from = queryCalendarDate(query, "from");
+    const to = queryCalendarDate(query, "to");
+    if (!from || !to) {
+      throw new RouteError(400, "validation_failed", "query parameters from and to are required (YYYY-MM-DD)");
+    }
+    const summaries = await services.activityIntelligence.getDailySummaries(userId, from, to);
+    return { body: { dailySummaries: summaries } };
+  });
+
+  router.add("GET", "/v0/users/:userId/activity/targets", async ({ params }) => {
+    const targets = await services.activityIntelligence.getActivityTargets(params["userId"]!);
+    return { body: { targets } };
+  });
+
+  router.add("GET", "/v0/users/:userId/activity/context", async ({ params, query }) => {
+    const windowDays = queryNumber(query, "windowDays", 1, 90) ?? 14;
+    const context = await services.activityIntelligence.getActivityContext(params["userId"]!, windowDays);
+    return { body: { context } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Recovery Intelligence (derived state)
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/users/:userId/recovery/state", async ({ params }) => {
+    const state = await services.recoveryIntelligence.getRecoveryState(params["userId"]!);
+    return { body: { state } };
+  });
+
+  router.add("GET", "/v0/users/:userId/recovery/trends", async ({ params, query }) => {
+    const windowDays = queryNumber(query, "windowDays", 1, 90) ?? 14;
+    const signals = await services.recoveryIntelligence.getRecoveryPlateauSignals(params["userId"]!);
+    return { body: { signals, windowDays } };
+  });
+
+  // -------------------------------------------------------------------------
   // Nutrition
   // -------------------------------------------------------------------------
   router.add("POST", "/v0/users/:userId/foods", async ({ params, body }) => {
@@ -1354,6 +1583,156 @@ export function registerRoutes(router: Router, services: AppServices): void {
     const daily = await services.nutrition.getDaily(params["userId"]!, date ?? undefined);
     if (!daily) throw new RouteError(404, "not_found", "no daily nutrition record for that date");
     return { body: { daily } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Recipes
+  // -------------------------------------------------------------------------
+  function parseRecipeItems(body: Record<string, unknown>): Array<{
+    foodId: string;
+    quantityGrams: number;
+    notes?: string;
+  }> {
+    const items = optionalObjectArray(body, "items", { maxItems: 100 });
+    if (!items || items.length === 0) {
+      throw new RouteError(400, "validation_failed", "items must be a non-empty array");
+    }
+    return items.map((item, index) => {
+      const foodId = requiredUuid(item, `items[${index}].foodId`);
+      const quantityGrams = requiredNumber(item, `items[${index}].quantityGrams`, {
+        min: 0.01,
+        max: 100_000,
+      });
+      const notes = optionalString(item, `items[${index}].notes`, { maxLength: 2000 });
+      return { foodId, quantityGrams, ...(notes !== undefined ? { notes } : {}) };
+    });
+  }
+
+  router.add("POST", "/v0/users/:userId/recipes", async ({ params, body }) => {
+    const userId = params["userId"]!;
+    const name = requiredString(body, "name", { maxLength: 300 });
+    const servings = requiredNumber(body, "servings", { min: 1, max: 1000, integer: true });
+    const instructions = optionalString(body, "instructions", { maxLength: 10000 });
+    const items = parseRecipeItems(body);
+
+    const recipe = await services.recipes.createRecipe(userId, {
+      name,
+      servings,
+      ...(instructions !== undefined ? { instructions } : {}),
+      items,
+    });
+    return { status: 201, body: { recipe } };
+  });
+
+  router.add("GET", "/v0/users/:userId/recipes", async ({ params }) => ({
+    body: { recipes: await services.recipes.listRecipes(params["userId"]!) },
+  }));
+
+  router.add("GET", "/v0/recipes/:recipeId", async ({ params }) => ({
+    body: { recipe: await services.recipes.getRecipe(params["recipeId"]!) },
+  }));
+
+  router.add("DELETE", "/v0/recipes/:recipeId", async ({ params }) => {
+    await services.recipes.deleteRecipe(params["recipeId"]!);
+    return { status: 204, body: {} };
+  });
+
+  router.add("GET", "/v0/recipes/:recipeId/nutrition", async ({ params, query }) => {
+    const servings = queryNumber(query, "servings", 0.01, 1000);
+    if (servings === undefined) {
+      throw new RouteError(400, "validation_failed", "query parameter servings is required");
+    }
+    const nutrition = await services.recipes.computeRecipeNutrition(params["recipeId"]!, servings);
+    return { body: { nutrition } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Nutrition Targets
+  // -------------------------------------------------------------------------
+  router.add("POST", "/v0/users/:userId/nutrition/targets", async ({ params, body }) => {
+    const userId = params["userId"]!;
+    const goal = requiredEnum(body, "goal", GOAL_KINDS) as unknown as import("@fitcoach/domain").Goal;
+    const currentBodyWeightKg = optionalNumber(body, "currentBodyWeightKg", { min: 1, max: 500 });
+    const bodyFatPercent = optionalNumber(body, "bodyFatPercent", { min: 0, max: 60 });
+
+    const targets = await services.nutritionTargets.deriveAndStoreTargets(userId, goal, {
+      currentBodyWeightKg,
+      bodyFatPercent,
+    });
+    return { status: 201, body: { targets } };
+  });
+
+  router.add("GET", "/v0/users/:userId/nutrition/targets", async ({ params }) => {
+    const targets = await services.nutritionTargets.getTargets(params["userId"]!);
+    if (!targets) throw new RouteError(404, "not_found", "no nutrition targets found");
+    return { body: { targets } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Nutrition Assessment
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/users/:userId/nutrition/assessment", async ({ params, query }) => {
+    const userId = params["userId"]!;
+    const windowDays = queryNumber(query, "windowDays", 1, 365);
+
+    // First get current targets
+    const targets = await services.nutritionTargets.getTargets(userId);
+    if (!targets) throw new RouteError(404, "not_found", "no nutrition targets found");
+
+    const assessment = await services.nutritionAssessment.assessAdherence(userId, targets, windowDays);
+    return { body: { assessment } };
+  });
+
+  // -------------------------------------------------------------------------
+  // Food Search
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/foods/search", async ({ query }) => {
+    const q = query.get("q");
+    if (!q || q.length < 2) {
+      throw new RouteError(400, "validation_failed", "query parameter q must be at least 2 characters");
+    }
+    const limit = queryNumber(query, "limit", 1, 100) ?? 20;
+    const offset = queryNumber(query, "offset", 0, 10000) ?? 0;
+    const sourceId = query.get("sourceId") ?? undefined;
+
+    const result = await services.nutrition.searchFoods(q, { limit, offset, sourceId });
+    return { body: result };
+  });
+
+  // -------------------------------------------------------------------------
+  // Barcode Scanner
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/barcode/lookup", async ({ query }) => {
+    const barcode = query.get("barcode");
+    if (!barcode || !BARCODE_PATTERN.test(barcode)) {
+      throw new RouteError(400, "validation_failed", "query parameter barcode must be a valid EAN/UPC code (8-14 digits)");
+    }
+
+    const result = await services.barcode.lookupBarcode(barcode);
+    return { body: result };
+  });
+
+  router.add("GET", "/v0/barcode/preview", async ({ query }) => {
+    const barcode = query.get("barcode");
+    if (!barcode || !BARCODE_PATTERN.test(barcode)) {
+      throw new RouteError(400, "validation_failed", "query parameter barcode must be a valid EAN/UPC code (8-14 digits)");
+    }
+    const servingGramsRaw = query.get("servingGrams");
+    if (!servingGramsRaw) {
+      throw new RouteError(400, "validation_failed", "query parameter servingGrams is required");
+    }
+    const servingGrams = Number(servingGramsRaw);
+    if (!Number.isFinite(servingGrams) || servingGrams <= 0 || servingGrams > 10000) {
+      throw new RouteError(400, "validation_failed", "servingGrams must be a positive number <= 10000");
+    }
+
+    const userId = query.get("userId");
+    if (!userId) {
+      throw new RouteError(401, "unauthorized", "query parameter userId is required for personalized assessment");
+    }
+
+    const result = await services.barcode.getProductPreview(barcode, servingGrams, userId);
+    return { body: result };
   });
 
   // -------------------------------------------------------------------------
@@ -1519,6 +1898,154 @@ export function registerRoutes(router: Router, services: AppServices): void {
       body: { outcomes: await services.coaching.listOutcomes(params["interventionId"]!) },
     }),
   );
+
+  // -------------------------------------------------------------------------
+  // Unified Decision Brain (Phase 8)
+  //
+  // End-to-end unified decision lifecycle: state construction → diagnosis →
+  // intervention selection → persistence → outcome evaluation.
+  // -------------------------------------------------------------------------
+
+  router.add(
+    "POST",
+    "/v0/users/:userId/decisions",
+    async ({ params, body }) => {
+      const userId = params["userId"]!;
+      const asOf = optionalDate(body, "asOf");
+      const forceReevaluate = optionalBoolean(body, "forceReevaluate");
+      const assumptionOverrides = optionalPlainObject(body, "assumptionOverrides");
+
+      const result = await services.unifiedDecision.generateDecision({
+        userId,
+        ...(asOf !== undefined ? { asOf } : {}),
+        ...(forceReevaluate !== undefined ? { forceReevaluate } : {}),
+        ...(assumptionOverrides ? { assumptionOverrides: assumptionOverrides as Record<string, string> } : {}),
+      });
+
+      return {
+        status: result.isNew ? 201 : 200,
+        body: {
+          snapshot: result.snapshot,
+          isNew: result.isNew,
+          previousSnapshot: result.previousSnapshot,
+          unifiedState: result.unifiedState,
+          diagnoses: result.diagnoses,
+          interventions: result.interventions,
+        }
+      };
+    },
+  );
+
+  router.add("GET", "/v0/users/:userId/decisions", async ({ params, query }) => {
+    const userId = params["userId"]!;
+    const status = query.get("status") as DecisionSnapshotStatus | undefined;
+    const limit = queryNumber(query, "limit", 1, 100);
+    const cursor = query.get("cursor");
+
+    const decisions = await services.unifiedDecision.listDecisions(userId, {
+      ...(status ? { status } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      ...(cursor ? { cursor } : {}),
+    });
+
+    return { body: { decisions } };
+  });
+
+  router.add("GET", "/v0/users/:userId/decisions/current", async ({ params }) => {
+    const userId = params["userId"]!;
+    const decision = await services.unifiedDecision.getCurrentDecision(userId);
+    return { body: { decision } };
+  });
+
+  router.add("GET", "/v0/users/:userId/decisions/:decisionId", async ({ params }) => {
+    const userId = params["userId"]!;
+    const decision = await services.unifiedDecision.getDecision(userId, params["decisionId"]!);
+    if (!decision) {
+      throw new RouteError(404, "not_found", "Decision not found");
+    }
+    return { body: { decision } };
+  });
+
+  router.add(
+    "POST",
+    "/v0/users/:userId/decisions/:decisionId/outcomes",
+    async ({ params, body }) => {
+      const userId = params["userId"]!;
+      const decisionId = params["decisionId"]!;
+      const evaluationWindow = requiredString(body, "evaluationWindow", { maxLength: 100 });
+      const verdict = requiredEnum(body, "verdict", [
+        "improved_as_expected",
+        "partially_improved",
+        "no_effect",
+        "worsened",
+        "uncertain",
+        "too_early",
+      ]);
+      const observations = optionalStringArray(body, "observations", { maxItems: 50, maxLength: 1000 });
+      const explanation = requiredString(body, "explanation", { maxLength: 8000 });
+      const followUpDiagnosisIds = optionalStringArray(body, "followUpDiagnosisIds", { maxItems: 20, maxLength: 100 });
+      const triggersReevaluation = optionalBoolean(body, "triggersReevaluation");
+      const evaluatedAt = optionalTimestamp(body, "evaluatedAt");
+      const interventionVerdictsRaw = optionalObjectArray(body, "interventionVerdicts", { maxItems: 20 }) ?? [];
+      const interventionVerdicts = interventionVerdictsRaw.map((item, index) => ({
+        interventionIndex: requiredNumber(item, `interventionVerdicts[${index}].interventionIndex`, { integer: true, min: 0 }),
+        verdict: requiredEnum(item, `interventionVerdicts[${index}].verdict`, [
+          "improved_as_expected",
+          "partially_improved",
+          "no_effect",
+          "worsened",
+          "uncertain",
+          "too_early",
+        ]),
+        observations: optionalStringArray(item, `interventionVerdicts[${index}].observations`, { maxItems: 20, maxLength: 500 }) ?? [],
+      }));
+
+      const outcome = await services.unifiedDecision.recordDecisionOutcome(userId, decisionId, {
+        evaluationWindow,
+        verdict,
+        observations: observations ?? [],
+        explanation,
+        followUpDiagnosisIds: followUpDiagnosisIds ?? [],
+        triggersReevaluation: triggersReevaluation ?? false,
+        evaluatedAt,
+        interventionVerdicts: interventionVerdicts ?? [],
+      });
+
+      return { status: 201, body: { outcome } };
+    },
+  );
+
+  router.add("GET", "/v0/users/:userId/decisions/:decisionId/outcomes", async ({ params, query }) => {
+    const userId = params["userId"]!;
+    const decisionId = params["decisionId"]!;
+    const queryObj = queryToObject(query);
+    const evaluationWindow = optionalString(queryObj, "evaluationWindow", { maxLength: 100 });
+    const limit = queryNumber(query, "limit", 1, 50);
+
+    const outcomes = await services.unifiedDecision.listDecisionOutcomes(userId, decisionId, {
+      ...(evaluationWindow ? { evaluationWindow } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+
+    return { body: { outcomes } };
+  });
+
+  router.add("GET", "/v0/users/:userId/decisions/:decisionId/reevaluate", async ({ params }) => {
+    const userId = params["userId"]!;
+    const decisionId = params["decisionId"]!;
+
+    const result = await services.unifiedDecision.shouldReevaluateDecision(userId, decisionId);
+    return { body: { should: result.should, reason: result.reason } };
+  });
+
+  router.add("GET", "/v0/users/:userId/unified-state", async ({ params, query }) => {
+    const userId = params["userId"]!;
+    const asOf = queryCalendarDate(query, "asOf");
+
+    const unifiedState = await services.unifiedDecision.buildUnifiedStateForUser(userId, asOf ?? (new Date().toISOString().split("T")[0] as any));
+
+    return { body: { unifiedState } };
+  });
 
   // -------------------------------------------------------------------------
   // Exercise knowledge (Phase 2)
@@ -1691,4 +2218,277 @@ export function registerRoutes(router: Router, services: AppServices): void {
       },
     };
   });
+
+// -------------------------------------------------------------------------
+// Body Intelligence (Phase 7)
+// -------------------------------------------------------------------------
+
+const PHYSIQUE_PRIORITY_TAGS = [
+  "upper_body",
+  "lower_body",
+  "push_muscles",
+  "pull_muscles",
+  "legs",
+  "glutes",
+  "core",
+  "shoulder_width",
+  "waist_proportion",
+  "arm_size",
+  "leg_size",
+  "back_width",
+  "chest_development",
+  "symmetry",
+  "proportion",
+  "overall_mass",
+  "leanness",
+  "custom",
+] as const;
+
+const GOAL_DIRECTIONS = ["maintain", "gain", "lose", "recomp"] as const;
+
+router.add("POST", "/v0/users/:userId/physique-goals", async ({ params, body }) => {
+  const userId = params["userId"]!;
+  const priorities = requiredStringArray(body, "priorities", { maxItems: 20, maxLength: 100 });
+  if (priorities.length === 0) {
+    throw new RouteError(400, "validation_failed", "priorities must be a non-empty array");
+  }
+  for (const p of priorities) {
+    if (!PHYSIQUE_PRIORITY_TAGS.includes(p as (typeof PHYSIQUE_PRIORITY_TAGS)[number])) {
+      throw new RouteError(400, "validation_failed", `invalid priority tag: ${p}`);
+    }
+  }
+  const customPrioritiesRaw = optionalObjectArray(body, "customPriorities", { maxItems: 10 });
+  const customPriorities = customPrioritiesRaw?.map((item, index) => ({
+    tag: requiredString(item, `customPriorities[${index}].tag`, { maxLength: 100 }),
+    label: requiredString(item, `customPriorities[${index}].label`, { maxLength: 200 }),
+  }));
+  const targetTimeframeWeeks = optionalNumber(body, "targetTimeframeWeeks", { min: 1, max: 104, integer: true });
+  const direction = optionalEnum(body, "direction", GOAL_DIRECTIONS);
+
+  const goal = await services.bodyIntelligence.createPhysiqueGoal(userId, {
+    userId,
+    priorities: priorities as any,
+    customPriorities,
+    targetTimeframeWeeks,
+    direction,
+  });
+  return { status: 201, body: { goal } };
+});
+
+router.add("GET", "/v0/users/:userId/physique-goals", async ({ params }) => {
+  const goal = await services.bodyIntelligence.getPhysiqueGoal(params["userId"]!);
+  if (!goal) {
+    // Return default based on active training goal
+    const activeGoal = await services.goals.active(params["userId"]!);
+    if (activeGoal) {
+      const defaultGoal = services.bodyIntelligence.getDefaultPhysiqueGoal(params["userId"]!, activeGoal.kind);
+      return { body: { goal: defaultGoal, isDefault: true } };
+    }
+    throw new RouteError(404, "not_found", "no physique goal set and no active training goal");
+  }
+  return { body: { goal, isDefault: false } };
+});
+
+router.add("PUT", "/v0/users/:userId/physique-goals", async ({ params, body }) => {
+  const updates: Partial<{
+    priorities: readonly import("@fitcoach/fitness-core").PhysiquePriorityTag[];
+    customPriorities: readonly { tag: string; label: string }[];
+    targetTimeframeWeeks: number;
+    direction: "maintain" | "gain" | "lose" | "recomp";
+  }> = {};
+  const priorities = optionalStringArray(body, "priorities", { maxItems: 20, maxLength: 100 });
+  if (priorities) {
+    for (const p of priorities) {
+      if (!PHYSIQUE_PRIORITY_TAGS.includes(p as (typeof PHYSIQUE_PRIORITY_TAGS)[number])) {
+        throw new RouteError(400, "validation_failed", `invalid priority tag: ${p}`);
+      }
+    }
+    updates.priorities = priorities as import("@fitcoach/fitness-core").PhysiquePriorityTag[];
+  }
+  const customPrioritiesRaw = optionalObjectArray(body, "customPriorities", { maxItems: 10 });
+  if (customPrioritiesRaw) {
+    updates.customPriorities = customPrioritiesRaw.map((item, index) => ({
+      tag: requiredString(item, `customPriorities[${index}].tag`, { maxLength: 100 }),
+      label: requiredString(item, `customPriorities[${index}].label`, { maxLength: 200 }),
+    }));
+  }
+  const targetTimeframeWeeks = optionalNumber(body, "targetTimeframeWeeks", { min: 1, max: 104, integer: true });
+  if (targetTimeframeWeeks !== undefined) updates.targetTimeframeWeeks = targetTimeframeWeeks;
+  const direction = optionalEnum(body, "direction", GOAL_DIRECTIONS);
+  if (direction) updates.direction = direction;
+
+  const goal = await services.bodyIntelligence.updatePhysiqueGoal(params["userId"]!, updates);
+  return { body: { goal } };
+});
+
+router.add("DELETE", "/v0/users/:userId/physique-goals", async ({ params }) => {
+  await services.bodyIntelligence.deletePhysiqueGoal(params["userId"]!);
+  return { status: 204, body: {} };
+});
+
+router.add("GET", "/v0/users/:userId/body/assessment", async ({ params, query }) => {
+  const userId = params["userId"]!;
+  const asOf = queryCalendarDate(query, "asOf");
+  const assessment = await services.bodyIntelligence.getBodyAssessment(userId, asOf);
+  return { body: { assessment } };
+});
+
+router.add("GET", "/v0/users/:userId/body/measurements/analysis", async ({ params }) => {
+  const userId = params["userId"]!;
+  const profile = await services.profiles.get(userId);
+  if (!profile || !profile.heightCm || !profile.sex) {
+    throw new RouteError(400, "validation_failed", "profile must have heightCm and sex set");
+  }
+  const analysis = await services.bodyIntelligence.getMeasurementAnalysis(userId, profile.heightCm, profile.sex as "male" | "female");
+  return { body: { analysis } };
+});
+
+router.add("GET", "/v0/users/:userId/body/muscle-development", async ({ params }) => {
+  const analysis = await services.bodyIntelligence.getMuscleDevelopmentAnalysis(params["userId"]!);
+  return { body: { analysis } };
+});
+
+router.add("GET", "/v0/users/:userId/body/disproportionate", async ({ params }) => {
+  const analysis = await services.bodyIntelligence.getDisproportionateAnalysis(params["userId"]!);
+  return { body: { analysis } };
+});
+
+router.add("GET", "/v0/users/:userId/body/recommendations", async ({ params }) => {
+  const recommendations = await services.bodyIntelligence.getBodyRecommendations(params["userId"]!);
+  return { body: { recommendations } };
+});
+
+router.add("GET", "/v0/users/:userId/body/integration-context", async ({ params }) => {
+  const context = await services.bodyIntelligence.getBodyContextForIntegration(params["userId"]!);
+  return { body: { context } };
+});
+
+// -------------------------------------------------------------------------
+// AI Coach conversations (Phase 9.3)
+//
+// Evidence-grounded coaching pipeline: orchestration → context builder →
+// decision brain → mock AI provider → validator → persistence.
+//
+// WARNING (security): there is no authentication layer yet. The userId in
+// the URL is trusted exactly as supplied by the client, so these routes are
+// NOT secure and MUST NOT be treated as authorized endpoints. Ownership is
+// enforced at the route/service level (a user can only touch their own
+// conversations and messages), but the userId itself is unauthenticated.
+// -------------------------------------------------------------------------
+
+router.add(
+  "POST",
+  "/v0/users/:userId/conversations",
+  coachingHandler(async ({ params, body }: { params: Record<string, string>; body: Record<string, unknown> }) => {
+    const userId = params["userId"]!;
+    const title = optionalString(body, "title", { maxLength: 200 });
+    const conversation = await services.aiCoaching.createConversation(userId, {
+      ...(title !== undefined ? { title } : {}),
+    });
+    return { status: 201, body: { conversation } };
+  }),
+);
+
+router.add(
+  "GET",
+  "/v0/users/:userId/conversations",
+  coachingHandler(async ({ params, query }: { params: Record<string, string>; query: URLSearchParams }) => {
+    const limit = queryNumber(query, "limit", 1, 100);
+    const cursor = query.get("cursor") ?? undefined;
+    const conversations = await services.aiCoaching.listConversations(params["userId"]!, {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(cursor ? { cursor } : {}),
+    });
+    return { body: { conversations } };
+  }),
+);
+
+router.add(
+  "GET",
+  "/v0/users/:userId/conversations/:conversationId/messages",
+  coachingHandler(async ({ params, query }: { params: Record<string, string>; query: URLSearchParams }) => {
+    const limit = queryNumber(query, "limit", 1, 100);
+    const messages = await services.aiCoaching.listMessages(
+      params["conversationId"]!,
+      params["userId"]!,
+      limit !== undefined ? { limit } : {},
+    );
+    return { body: { messages } };
+  }),
+);
+
+router.add(
+  "POST",
+  "/v0/users/:userId/conversations/:conversationId/messages",
+  coachingHandler(async ({ params, body }: { params: Record<string, string>; body: Record<string, unknown> }) => {
+    const userId = params["userId"]!;
+    const conversationId = params["conversationId"]!;
+    const message = requiredString(body, "message", { maxLength: 4000 });
+    const asOf = optionalDate(body, "asOf");
+    const intentRaw = optionalPlainObject(body, "intent");
+
+    const coachingRequest: CoachingRequest = {
+      userId,
+      conversationId,
+      message,
+      ...(asOf !== undefined ? { asOf } : {}),
+      ...(intentRaw ? { intent: intentRaw as unknown as IntentClassification } : {}),
+      // Source selection is driven by the classified intent (the builder
+      // defaults to all sources when the intent is uncertain); callers must
+      // not override it, or the sufficiency gate would be evaluated against
+      // sources the question does not need.
+    };
+
+    const response = await services.aiCoaching.handleCoachingRequest(coachingRequest);
+    return { status: 200, body: response };
+  }),
+);
+
+router.add(
+  "GET",
+  "/v0/users/:userId/messages/:messageId",
+  coachingHandler(async ({ params }: { params: Record<string, string> }) => {
+    const message = await services.aiCoaching.getMessage(
+      params["messageId"]!,
+      params["userId"]!,
+    );
+    return { body: { message } };
+  }),
+);
+
+router.add(
+  "POST",
+  "/v0/users/:userId/conversations/:conversationId/messages/:messageId/actions/:actionId/preview",
+  coachingHandler(async ({ params }: { params: Record<string, string> }) => {
+    const { record, preview } = await services.aiCoaching.previewAction(
+      params["actionId"]!,
+      params["userId"]!,
+    );
+    return { body: { action: record, preview } };
+  }),
+);
+
+router.add(
+  "POST",
+  "/v0/users/:userId/conversations/:conversationId/messages/:messageId/actions/:actionId/confirm",
+  coachingHandler(async ({ params }: { params: Record<string, string> }) => {
+    const result = await services.aiCoaching.confirmAction(
+      params["actionId"]!,
+      params["userId"]!,
+    );
+    return { body: result };
+  }),
+);
+
+router.add(
+  "POST",
+  "/v0/users/:userId/conversations/:conversationId/messages/:messageId/actions/:actionId/reject",
+  coachingHandler(async ({ params }: { params: Record<string, string> }) => {
+    const result = await services.aiCoaching.rejectAction(
+      params["actionId"]!,
+      params["userId"]!,
+    );
+    return { body: result };
+  }),
+);
 }

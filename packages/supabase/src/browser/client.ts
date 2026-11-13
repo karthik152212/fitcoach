@@ -6,7 +6,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { getEnv } from "../shared/env";
+import { getEnv } from "../shared/env.js";
 
 let browserClient: SupabaseClient | null = null;
 

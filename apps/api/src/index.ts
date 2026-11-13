@@ -21,7 +21,7 @@ export function main(): void {
 
   const prisma = createPrismaClient({ url: databaseUrl });
   const repositories = createRepositories(prisma);
-  const services = createServices(repositories);
+  const services = createServices(repositories, prisma);
 
   const port = Number(process.env["PORT"] ?? DEFAULT_PORT);
   const server = createServer({ services });

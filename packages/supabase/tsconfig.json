@@ -6,10 +6,9 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "moduleResolution": "bundler",
-    "module": "ESNext",
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM"]
+    "moduleResolution": "NodeNext",
+    "module": "NodeNext",
+    "target": "ES2022"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

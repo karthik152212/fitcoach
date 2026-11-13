@@ -18,7 +18,7 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:migrate:status": "prisma migrate status",
-    "db:seed": "node dist/seed/cli.js",
+    "db:seed": "tsx prisma/seed.ts",
     "test": "npm run build && node --env-file-if-exists=../.env --test dist/__tests__/unit.test.js",
     "test:integration": "npm run build && node --env-file-if-exists=../.env --test dist/__tests__/persistence.integration.js"
   },
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "embedded-postgres": "^17.5.0-beta.15",
-    "prisma": "^6.16.2"
+    "prisma": "^6.16.2",
+    "tsx": "^4.23.15"
   }
 }

@@ -217,6 +217,17 @@ export function optionalStringArray(
   return value as string[];
 }
 
+export function requiredStringArray(
+  obj: Record<string, unknown>,
+  key: string,
+  options: { maxLength?: number; maxItems?: number } = {},
+): string[] {
+  const value = optionalStringArray(obj, key, options);
+  if (value === undefined) fail(key, "is required and must be an array of strings");
+  if (value.length === 0) fail(key, "must be a non-empty array");
+  return value;
+}
+
 export function optionalPlainObject(
   obj: Record<string, unknown>,
   key: string,

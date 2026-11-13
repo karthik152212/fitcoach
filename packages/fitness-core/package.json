@@ -7,6 +7,28 @@
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./src/index.ts"
+    },
+    "./activity": {
+      "import": "./dist/activity.js",
+      "require": "./dist/activity.js",
+      "types": "./src/activity.ts"
+    },
+    "./recovery": {
+      "import": "./dist/recovery.js",
+      "require": "./dist/recovery.js",
+      "types": "./src/recovery.ts"
+    },
+    "./projection": {
+      "import": "./dist/projection.js",
+      "require": "./dist/projection.js",
+      "types": "./src/projection.ts"
+    }
+  },
   "files": [
     "dist"
   ],

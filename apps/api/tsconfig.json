@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../packages/domain" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/nutrition" }
+    { "path": "../../packages/nutrition" },
+    { "path": "../../packages/ai" }
   ]
 }

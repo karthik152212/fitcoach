@@ -384,6 +384,48 @@ test("frequency planning distributes work instead of duplicating a workout", asy
     );
   });
 
+  await t.test("a 3-day full-body week leaves no session without work", () => {
+    // Regression: every muscle used to take the first k sessions, so with a
+    // sub-weekly frequency target the last session received no muscle at all
+    // and the plan was reported as having no eligible exercises.
+    const muscles = {
+      pectoralis_major: 12,
+      latissimus_dorsi: 12,
+      deltoid_lateral: 11,
+      quadriceps: 11,
+      hamstrings: 9,
+      gluteus_maximus: 9,
+      biceps_brachii: 8,
+      triceps_brachii: 8,
+      gastrocnemius: 6,
+      rectus_abdominis: 6,
+      trapezius: 6,
+      rhomboids: 5,
+      deltoid_anterior: 8,
+      deltoid_posterior: 6,
+      erector_spinae: 4,
+    };
+    const result = distributeFrequency(muscles, 3, "hypertrophy", "beginner", "full_body");
+
+    assert.equal(result.distribution.length, 3);
+    for (const session of result.distribution) {
+      assert.ok(session.muscleCount > 0, `session ${session.sessionIndex} trains at least one muscle`);
+      assert.ok(session.totalVolume > 0, `session ${session.sessionIndex} has volume`);
+    }
+
+    // Spreading the rotation must also keep the week from piling onto one day.
+    const volumes = result.distribution.map((session) => session.totalVolume);
+    assert.ok(
+      Math.max(...volumes) <= Math.min(...volumes) * 2,
+      `sessions are within 2x of each other (${volumes.join(", ")})`,
+    );
+    assert.deepEqual(
+      distributeFrequency(muscles, 3, "hypertrophy", "beginner", "full_body"),
+      result,
+      "distribution is deterministic",
+    );
+  });
+
   await t.test("upper/lower keeps muscles on the matching session type", () => {
     const result = distributeFrequency(
       { biceps_brachii: 4, quadriceps: 4 },

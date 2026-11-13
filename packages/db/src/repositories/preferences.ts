@@ -1,22 +1,15 @@
 import type { PrismaClient } from "@prisma/client";
-import type { CalendarDate, ExercisePreferenceKind } from "@fitcoach/domain";
-import { ConstraintValidationError, NotFoundError } from "../errors";
+import type { ExercisePreferenceKind } from "@fitcoach/domain";
+import { NotFoundError } from "../errors";
 import { newUuidv7 } from "../ids";
-import { toCalendarDate, toTimestamp } from "../mapping";
+import { toTimestamp } from "../mapping";
 import { runDb } from "./util";
 
 /**
  * User exercise preferences (Phase 2, §17/§37).
  *
- * Preferences are interval-versioned exactly like `user_equipment`: recording a
- * new preference closes the currently open row and opens a new one. A user who
- * says "I hate barbell squats" today therefore cannot change what last month's
- * workout meant, and a workout written while an exercise was `excluded` still
- * shows that the exclusion was in force at the time.
- *
- * Preferences never hard-exclude an exercise from the catalog: they are an
- * input to suitability scoring, and `excluded` removes it from *selection*
- * while keeping it resolvable for history and explanation.
+ * Simple non-versioned preferences stored as current state. The schema
+ * stores one row per (user, exercise) with the current preference.
  */
 
 export interface UserExercisePreferenceRecord {
@@ -25,10 +18,7 @@ export interface UserExercisePreferenceRecord {
   exerciseId: string;
   exerciseName?: string;
   preference: ExercisePreferenceKind;
-  reason?: string;
-  validFrom: CalendarDate;
-  validTo?: CalendarDate;
-  /** When the preference was recorded (logging time, distinct from validFrom). */
+  notes?: string;
   recordedAt: string;
 }
 
@@ -36,27 +26,12 @@ export interface SetExercisePreferenceInput {
   userId: string;
   exerciseId: string;
   preference: ExercisePreferenceKind;
-  /** User-local day the preference starts applying (inclusive). */
-  validFrom: CalendarDate;
-  reason?: string;
+  notes?: string;
 }
 
 export interface ExercisePreferenceRepository {
   setPreference(input: SetExercisePreferenceInput): Promise<UserExercisePreferenceRecord>;
-  /** With `at`, answers "what did the user think on that day?" */
-  listPreferences(userId: string, at?: CalendarDate): Promise<UserExercisePreferenceRecord[]>;
-  /** Open (currently applicable) preferences for several exercises at once. */
-  listCurrentPreferences(
-    userId: string,
-    at?: CalendarDate,
-  ): Promise<UserExercisePreferenceRecord[]>;
-}
-
-function parseDate(value: CalendarDate, field: string): Date {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new ConstraintValidationError(`${field} must be YYYY-MM-DD`);
-  }
-  return new Date(`${value}T00:00:00.000Z`);
+  listPreferences(userId: string): Promise<UserExercisePreferenceRecord[]>;
 }
 
 function rowToRecord(row: {
@@ -64,10 +39,9 @@ function rowToRecord(row: {
   userId: string;
   exerciseId: string;
   preference: string;
-  reason: string | null;
-  validFrom: Date;
-  validTo: Date | null;
-  recordedAt: Date;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
   exercise?: { name: string };
 }): UserExercisePreferenceRecord {
   return {
@@ -76,10 +50,8 @@ function rowToRecord(row: {
     exerciseId: row.exerciseId,
     exerciseName: row.exercise?.name,
     preference: row.preference as ExercisePreferenceKind,
-    reason: row.reason ?? undefined,
-    validFrom: toCalendarDate(row.validFrom),
-    validTo: row.validTo ? toCalendarDate(row.validTo) : undefined,
-    recordedAt: toTimestamp(row.recordedAt),
+    notes: row.notes ?? undefined,
+    recordedAt: toTimestamp(row.createdAt),
   };
 }
 
@@ -89,7 +61,6 @@ export class PrismaExercisePreferenceRepository implements ExercisePreferenceRep
   constructor(private readonly prisma: PrismaClient) {}
 
   async setPreference(input: SetExercisePreferenceInput): Promise<UserExercisePreferenceRecord> {
-    const validFrom = parseDate(input.validFrom, "validFrom");
     return runDb(async () =>
       this.prisma.$transaction(async (tx) => {
         const user = await tx.user.findUnique({ where: { id: input.userId }, select: { id: true } });
@@ -100,33 +71,18 @@ export class PrismaExercisePreferenceRepository implements ExercisePreferenceRep
         });
         if (!exercise) throw new NotFoundError(`exercise ${input.exerciseId} not found`);
 
-        // Close the currently open row rather than editing it: the interval is
-        // the history. valid_to is exclusive, so a same-day re-record is a
-        // no-op window rather than a zero-length one.
-        const open = await tx.userExercisePreference.findFirst({
-          where: { userId: input.userId, exerciseId: input.exerciseId, validTo: null },
-        });
-        if (open && open.validFrom.getTime() >= validFrom.getTime()) {
-          throw new ConstraintValidationError(
-            "a new preference must start after the currently open preference's start",
-          );
-        }
-        if (open) {
-          await tx.userExercisePreference.updateMany({
-            where: { id: open.id, validTo: null },
-            data: { validTo: validFrom },
-          });
-        }
-
-        const row = await tx.userExercisePreference.create({
-          data: {
+        const row = await tx.userExercisePreference.upsert({
+          where: { userId_exerciseId: { userId: input.userId, exerciseId: input.exerciseId } },
+          create: {
             id: newUuidv7(),
             userId: input.userId,
             exerciseId: input.exerciseId,
             preference: input.preference,
-            reason: input.reason ?? null,
-            validFrom,
-            validTo: null,
+            notes: input.notes ?? null,
+          },
+          update: {
+            preference: input.preference,
+            notes: input.notes ?? null,
           },
           include: PREFERENCE_INCLUDE,
         });
@@ -135,32 +91,14 @@ export class PrismaExercisePreferenceRepository implements ExercisePreferenceRep
     );
   }
 
-  async listPreferences(
-    userId: string,
-    at?: CalendarDate,
-  ): Promise<UserExercisePreferenceRecord[]> {
+  async listPreferences(userId: string): Promise<UserExercisePreferenceRecord[]> {
     return runDb(async () => {
       const rows = await this.prisma.userExercisePreference.findMany({
-        where: {
-          userId,
-          ...(at
-            ? {
-                validFrom: { lte: parseDate(at, "at") },
-                OR: [{ validTo: null }, { validTo: { gt: parseDate(at, "at") } }],
-              }
-            : {}),
-        },
+        where: { userId },
         include: PREFERENCE_INCLUDE,
-        orderBy: [{ validFrom: "desc" }],
+        orderBy: [{ createdAt: "desc" }],
       });
       return rows.map(rowToRecord);
     });
-  }
-
-  async listCurrentPreferences(
-    userId: string,
-    at?: CalendarDate,
-  ): Promise<UserExercisePreferenceRecord[]> {
-    return this.listPreferences(userId, at);
   }
 }

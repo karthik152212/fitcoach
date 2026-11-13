@@ -171,6 +171,7 @@ export interface UpdateUserInput {
   email?: string;
   displayName?: string;
   timezone?: string;
+  externalAuthId?: string;
 }
 
 export interface UserRepository {
@@ -271,6 +272,7 @@ export class PrismaUserRepository implements UserRepository {
           ...(patch.email !== undefined ? { email: patch.email } : {}),
           ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
           ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
+          ...(patch.externalAuthId !== undefined ? { externalAuthId: patch.externalAuthId } : {}),
         },
       });
       const updated = await this.load(id);

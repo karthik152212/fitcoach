@@ -132,15 +132,21 @@ export class KnowledgeService {
   } | null> {
     const version = await this.repos.knowledge.findActiveFormVersion(exerciseId);
     if (!version) return null;
+    const steps = (version.steps as readonly import("@fitcoach/domain").FormGuidanceStep[]).map((step) => ({
+      key: step.key,
+      heading: step.heading,
+      body: step.body,
+      position: step.position,
+    }));
     return {
       version: version.version,
       status: version.status,
       effectiveFrom: version.effectiveFrom,
       ...(version.reviewNotes !== undefined ? { reviewNotes: version.reviewNotes } : {}),
-      steps: version.steps,
-      validation: validateFormGuidance(version.steps),
-      quickInstructions: quickInstructions(version.steps),
-      videoCaptions: videoCaptions(version.steps),
+      steps,
+      validation: validateFormGuidance(steps),
+      quickInstructions: quickInstructions(steps),
+      videoCaptions: videoCaptions(steps),
     };
   }
 
@@ -176,11 +182,10 @@ export class KnowledgeService {
     };
   }
 
-  private async preferences(userId: string, at?: CalendarDate): Promise<Record<string, ExercisePreferenceKind>> {
-    const rows = await this.repos.exercisePreferences.listCurrentPreferences(userId, at);
+  private async preferences(userId: string, _at?: CalendarDate): Promise<Record<string, ExercisePreferenceKind>> {
+    const rows = await this.repos.exercisePreferences.listPreferences(userId);
     const result: Record<string, ExercisePreferenceKind> = {};
-    // Open intervals only; if history is ever replayed, the applicable row wins.
-    for (const row of rows.filter((item) => item.validTo === undefined)) {
+    for (const row of rows) {
       result[row.exerciseId] = row.preference;
     }
     return result;
@@ -234,8 +239,8 @@ export class KnowledgeService {
     });
   }
 
-  async exercisePreferences(userId: string, at?: CalendarDate) {
-    return this.repos.exercisePreferences.listPreferences(userId, at);
+  async exercisePreferences(userId: string, _at?: CalendarDate) {
+    return this.repos.exercisePreferences.listPreferences(userId);
   }
 
   // -----------------------------------------------------------------------
@@ -345,11 +350,11 @@ export class KnowledgeService {
       temporarilyUnavailableEquipmentIds: equipmentContextState.temporarilyUnavailableEquipmentIds,
       limitations: context.limitations,
       curatedSubstitutions: curated.map((row) => ({
-        exerciseId: row.exerciseId,
-        substituteExerciseId: row.substituteExerciseId,
-        trigger: row.trigger as SubstitutionTrigger,
+        exerciseId: row.fromExerciseId,
+        substituteExerciseId: row.toExerciseId,
+        trigger: "equipment_unavailable" as SubstitutionTrigger,
         reason: row.reason,
-        rankHint: row.rankHint,
+        rankHint: row.similarity,
       })),
       ...(options?.includeAlternatives !== undefined
         ? { includeAlternatives: options.includeAlternatives }
@@ -377,11 +382,11 @@ export class KnowledgeService {
             temporarilyUnavailableEquipmentIds: equipmentContextState.temporarilyUnavailableEquipmentIds,
             limitations: context.limitations,
             curated: curated.map((row) => ({
-              exerciseId: row.exerciseId,
-              substituteExerciseId: row.substituteExerciseId,
-              trigger: row.trigger as SubstitutionTrigger,
+              exerciseId: row.fromExerciseId,
+              substituteExerciseId: row.toExerciseId,
+              trigger: "equipment_unavailable" as SubstitutionTrigger,
               reason: row.reason,
-              rankHint: row.rankHint,
+              rankHint: row.similarity,
             })),
             limit: options.alternativeLimit ?? 5,
           }).map((item) => ({

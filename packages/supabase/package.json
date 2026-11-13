@@ -4,10 +4,16 @@
   "private": true,
   "license": "UNLICENSED",
   "description": "Supabase client initialization and configuration for FitCoach.",
-  "type": "commonjs",
+  "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "files": ["dist"],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

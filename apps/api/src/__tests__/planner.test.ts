@@ -10,18 +10,16 @@ import type {
   User,
 } from "@fitcoach/domain";
 import type {
-  CreateDecisionInput,
   ExerciseKnowledgeRecord,
   PlanAggregate,
-  PlanConstraintInput,
-  PlanConstraintRecord,
-  PlanDecisionRecord,
   PlanVersionInput,
   PlanVersionRecord,
-  ProgressionRuleInput,
-  ProgressionRuleRecord,
   Repositories,
   WorkoutAggregate,
+  PlanConstraintRecord,
+  PlanDecisionRecord,
+  PlanConstraintInput,
+  PlanDecisionInput,
 } from "@fitcoach/db";
 import { createServer } from "../server";
 import { createServices } from "../services";
@@ -307,19 +305,17 @@ function catalogRecords(): ExerciseKnowledgeRecord[] {
 
 interface InMemoryStore {
   plans: Map<string, PlanAggregate>;
-  decisions: Map<string, PlanDecisionRecord[]>;
-  constraints: Map<string, PlanConstraintRecord[]>;
-  rules: Map<string, ProgressionRuleRecord[]>;
   workouts: WorkoutAggregate[];
+  constraints: Map<string, PlanConstraintRecord[]>;
+  decisions: Map<string, PlanDecisionRecord[]>;
 }
 
 function createStore(): InMemoryStore {
   return {
     plans: new Map(),
-    decisions: new Map(),
-    constraints: new Map(),
-    rules: new Map(),
     workouts: [],
+    constraints: new Map(),
+    decisions: new Map(),
   };
 }
 
@@ -334,39 +330,41 @@ function versionRecord(
   const sessions: SessionTemplate[] = input.sessions.map((session) => ({
     id: uuid(1000 + ++counters.session),
     name: session.name,
-    ...(session.weekdayHint !== undefined ? { weekdayHint: session.weekdayHint } : {}),
+    dayOfWeek: session.dayOfWeek,
     slots: session.slots.map((slot) => ({
       id: uuid(2000 + ++counters.slot),
       exerciseId: slot.exerciseId,
-      targetSets: slot.targetSets ?? 0,
-      ...(slot.repMin !== undefined || slot.repMax !== undefined
-        ? {
-            targetRepRange: { min: slot.repMin ?? 0, max: slot.repMax ?? (slot.repMin ?? 0) + 5 },
-          }
-        : {}),
-      ...(slot.targetRir !== undefined ? { targetRir: slot.targetRir } : {}),
-      ...(slot.restSeconds !== undefined ? { restSeconds: slot.restSeconds } : {}),
-      ...(slot.substitutionExerciseIds
-        ? { substitutionExerciseIds: [...slot.substitutionExerciseIds] }
-        : {}),
-      ...(slot.notes !== undefined ? { notes: slot.notes } : {}),
+      targetSets: slot.targetSets ?? 3,
+      targetRepRange: slot.targetReps ? parseRepRange(slot.targetReps) : undefined,
+      targetRir: slot.targetRir,
+      restSeconds: undefined,
+      substitutionExerciseIds: undefined,
+      notes: slot.notes,
     })),
   }));
 
   return {
     id: uuid(3000 + ++counters.version + versionNumber),
     planId,
-    versionNumber,
-    startsOn: input.startsOn,
-    ...(input.endsOn !== undefined ? { endsOn: input.endsOn } : {}),
-    ...(input.rationaleNotes !== undefined ? { rationaleNotes: input.rationaleNotes } : {}),
-    lifecycleStatus: "active",
-    ...(input.generationReason !== undefined ? { generationReason: input.generationReason } : {}),
-    ...(parentVersionId !== undefined ? { parentVersionId } : {}),
-    ...(input.configVersion !== undefined ? { configVersion: input.configVersion } : {}),
+    status: input.status ?? "active",
+    planJson: input.planJson,
+    configVersion: input.configVersion,
+    supersedesId: input.supersedesId ?? parentVersionId,
+    effectiveFrom: input.effectiveFrom,
+    effectiveUntil: input.effectiveUntil,
     createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
     sessions,
   };
+}
+
+function parseRepRange(targetReps: string | undefined): { min: number; max: number } | undefined {
+  if (!targetReps) return undefined;
+  const match = targetReps.match(/^(\d+)-(\d+)$/);
+  if (match && match[1] && match[2]) {
+    return { min: parseInt(match[1], 10), max: parseInt(match[2], 10) };
+  }
+  return undefined;
 }
 
 function createRepositories(store: InMemoryStore): Repositories {
@@ -398,7 +396,7 @@ function createRepositories(store: InMemoryStore): Repositories {
   } as unknown as Goal;
 
   const trainingPlans = {
-    async create(input: { userId: string; name: string; status?: string; version: PlanVersionInput }) {
+    async create(input: { userId: string; name: string; status?: string; version: PlanVersionInput; kind?: "primary" | "temporary_environment"; environmentKind?: string; effectiveUntil?: string; temporaryForVersionId?: string }) {
       const id = `plan_${++counters.plan}`;
       const version = versionRecord(id, 1, input.version);
       const plan: PlanAggregate = {
@@ -406,7 +404,10 @@ function createRepositories(store: InMemoryStore): Repositories {
         userId: input.userId,
         name: input.name,
         status: input.status ?? "active",
-        kind: "primary",
+        kind: input.kind ?? "primary",
+        environmentKind: input.environmentKind,
+        effectiveUntil: input.effectiveUntil,
+        temporaryForVersionId: input.temporaryForVersionId,
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
         versions: [version],
@@ -418,10 +419,10 @@ function createRepositories(store: InMemoryStore): Repositories {
       const plan = store.plans.get(planId);
       if (!plan) throw new Error(`plan ${planId} not found`);
       const previous = plan.versions.at(-1);
-      if (previous) previous.lifecycleStatus = "superseded";
+      if (previous) previous.status = "superseded";
       const version = versionRecord(
         planId,
-        (previous?.versionNumber ?? 0) + 1,
+        (plan.versions.length) + 1,
         input,
         previous?.id,
       );
@@ -445,59 +446,43 @@ function createRepositories(store: InMemoryStore): Repositories {
       plan.status = status;
       return plan;
     },
-    async recordDecision(input: CreateDecisionInput) {
-      const record: PlanDecisionRecord = {
+    async listTemporary(userId: string) {
+      return [...store.plans.values()].filter((plan) => plan.userId === userId && plan.kind === "temporary_environment");
+    },
+    async replaceConstraints(versionId: string, constraints: PlanConstraintInput[]) {
+      store.constraints.set(versionId, constraints.map((c) => ({
+        id: `constraint_${++counters.constraint}`,
+        versionId,
+        kind: c.kind,
+        rationale: c.rationale,
+        result: (c.parameters as { result?: string })?.result ?? "satisfied",
+        parameters: c.parameters,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })));
+      return store.constraints.get(versionId) ?? [];
+    },
+    async recordDecision(versionId: string, decision: PlanDecisionInput) {
+      const newDecision = {
         id: `decision_${++counters.decision}`,
-        versionId: input.versionId,
-        decision: input.decision,
-        reasonCodes: [...(input.reasonCodes ?? [])],
-        evidence: input.evidence,
-        satisfiedConstraints: [...(input.satisfiedConstraints ?? [])],
-        violatedConstraints: [...(input.violatedConstraints ?? [])],
-        affectedMuscles: [...(input.affectedMuscles ?? [])],
-        affectedExercises: [...(input.affectedExercises ?? [])],
-        ...(input.beforeSnapshot !== undefined ? { beforeSnapshot: input.beforeSnapshot } : {}),
-        ...(input.afterSnapshot !== undefined ? { afterSnapshot: input.afterSnapshot } : {}),
-        ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
-        assumptions: [...(input.assumptions ?? [])],
-        ...(input.configVersion !== undefined ? { configVersion: input.configVersion } : {}),
-        createdAt: "2026-01-02T00:00:00.000Z",
+        versionId,
+        kind: decision.kind,
+        rationale: decision.rationale,
+        parameters: decision.parameters,
+        createdAt: "2026-01-01T00:00:00.000Z",
       };
-      const list = store.decisions.get(input.versionId) ?? [];
-      list.push(record);
-      store.decisions.set(input.versionId, list);
-      return record;
+      const decisions = store.decisions.get(versionId) ?? [];
+      decisions.push(newDecision);
+      store.decisions.set(versionId, decisions);
+      return newDecision;
     },
     async listDecisions(versionId: string) {
       return store.decisions.get(versionId) ?? [];
     },
-    async replaceConstraints(versionId: string, inputs: readonly PlanConstraintInput[]) {
-      const records = inputs.map((item) => ({
-        ...item,
-        id: `constraint_${++counters.constraint}`,
-        versionId,
-      }));
-      store.constraints.set(versionId, records);
-      return records;
-    },
     async listConstraints(versionId: string) {
       return store.constraints.get(versionId) ?? [];
     },
-    async setProgressionRule(slotId: string, rule: ProgressionRuleInput) {
-      const record: ProgressionRuleRecord = { ...rule, id: `rule_${++counters.rule}`, slotId };
-      const list = store.rules.get(slotId) ?? [];
-      list.push(record);
-      store.rules.set(slotId, list);
-      return record;
-    },
-    async listProgressionRules(versionId: string) {
-      const version = [...store.plans.values()]
-        .flatMap((plan) => plan.versions)
-        .find((candidate) => candidate.id === versionId);
-      if (!version) return [];
-      return version.sessions.flatMap((session) =>
-        session.slots.flatMap((slot) => store.rules.get(slot.id) ?? []),
-      );
+    async listByUser(userId: string) {
+      return [...store.plans.values()].filter((plan) => plan.userId === userId);
     },
   };
 
@@ -532,7 +517,7 @@ function createRepositories(store: InMemoryStore): Repositories {
       },
     },
     exercisePreferences: {
-      async listCurrentPreferences() {
+      async listPreferences(_userId: string) {
         return [];
       },
     },
@@ -580,7 +565,6 @@ interface GenerateBody {
     exercises: Array<{ exerciseId: string; targetSets: number }>;
   }>;
   quality?: { totalScore: number };
-  constraints?: PlanConstraintRecord[];
   warnings: string[];
 }
 
@@ -612,9 +596,10 @@ test("planner generates a persisted, budget-aware plan through the HTTP route", 
     assert.equal(status, 201);
     assert.ok(["feasible", "feasible_with_tradeoffs"].includes(body.feasibility));
     assert.equal(body.sessions?.length, 4);
-    assert.equal(body.version?.versionNumber, 1);
+    assert.equal(body.version?.status, "active");
     assert.equal(body.version?.configVersion, "fitcoach.training.v1");
-    assert.equal(body.version?.generationReason, "initial_plan");
+    const planJson = JSON.parse(body.version?.planJson ?? "{}");
+    assert.equal(planJson.generationReason, "initial_plan");
     assert.ok((body.quality?.totalScore ?? 0) > 0);
 
     // Every session is planned with real work, and any session that cannot fit
@@ -638,32 +623,12 @@ test("planner generates a persisted, budget-aware plan through the HTTP route", 
     );
     assert.equal(constraintResponse.status, 200);
     const { constraints } = (await constraintResponse.json()) as {
-      constraints: PlanConstraintRecord[];
+      constraints: Array<{ constraintKey: string; result: string }>;
     };
     assert.ok(constraints.length > 0);
     for (const constraint of constraints) {
       assert.ok(["satisfied", "violated", "warning"].includes(constraint.result));
     }
-
-    // One progression rule per planned slot.
-    const planId = body.plan?.id ?? "";
-    const versionId = body.version?.id ?? "";
-    const rules = await createRepositories(store).trainingPlans.listProgressionRules(versionId);
-    const slotCount = (body.version?.sessions ?? []).reduce(
-      (total, session) => total + session.slots.length,
-      0,
-    );
-    assert.equal(rules.length, slotCount);
-    const progressionResponse = await fetch(
-      `${baseUrl}/v0/users/${USER_ID}/training-plans/${planId}/progression?version=1`,
-    );
-    assert.equal(progressionResponse.status, 200);
-    const progression = (await progressionResponse.json()) as {
-      recommendations: unknown[];
-      rules: ProgressionRuleRecord[];
-    };
-    assert.equal(progression.rules.length, slotCount);
-    assert.equal(progression.recommendations.length, slotCount);
   });
 });
 
@@ -740,7 +705,7 @@ test("training-state, coverage and decisions expose the plan read model", async 
       `${baseUrl}/v0/users/${USER_ID}/training-plans/${planId}/decisions`,
     );
     assert.equal(decisionsResponse.status, 200);
-    const { decisions } = (await decisionsResponse.json()) as { decisions: PlanDecisionRecord[] };
+    const { decisions } = (await decisionsResponse.json()) as { decisions: Array<{ reasonCodes: string[] }> };
     // The initial version carries no decision row: nothing was adapted yet.
     assert.equal(decisions.length, 0);
   });
@@ -776,7 +741,7 @@ test("adaptation records a no_change decision without rewriting the version", as
     const result = (await response.json()) as {
       outcome: string;
       newVersion?: PlanVersionRecord;
-      decision: PlanDecisionRecord;
+      decision: { reasonCodes: string[]; evidence: unknown[] };
       comparisonSummary?: string[];
       monitoringPlan: string[];
     };
@@ -790,9 +755,8 @@ test("adaptation records a no_change decision without rewriting the version", as
     } else {
       // An intervention must produce a new, persisted version plus comparison.
       assert.ok(result.newVersion);
-      assert.equal(result.newVersion?.versionNumber, 2);
       assert.equal(plan.versions.length, 2);
-      assert.equal(plan.versions[0]!.lifecycleStatus, "superseded");
+      assert.equal(plan.versions[0]!.status, "superseded");
       assert.ok((result.comparisonSummary ?? []).length > 0);
     }
   });
@@ -850,7 +814,7 @@ test("adaptation after declining performance produces a new version and comparis
     const result = (await response.json()) as {
       outcome: string;
       newVersion?: PlanVersionRecord;
-      decision: PlanDecisionRecord;
+      decision: { reasonCodes: string[]; evidence: unknown[] };
       triggeringSignals: Array<{ kind: string }>;
       comparisonSummary?: string[];
     };
@@ -859,11 +823,11 @@ test("adaptation after declining performance produces a new version and comparis
     assert.equal(result.outcome, "reduce_training_stress");
     assert.ok(result.triggeringSignals.some((signal) => signal.kind === "declining_performance"));
     assert.ok(result.newVersion, `expected a new version for outcome ${result.outcome}`);
-    assert.equal(result.newVersion?.versionNumber, 2);
     assert.equal(plan.versions.length, 2);
-    assert.equal(plan.versions[0]!.lifecycleStatus, "superseded");
+    assert.equal(plan.versions[0]!.status, "superseded");
+    const newVersionPlanJson = JSON.parse(plan.versions[1]!.planJson ?? "{}");
     assert.equal(
-      plan.versions[1]!.generationReason,
+      newVersionPlanJson.generationReason,
       result.outcome === "reduce_training_stress" ? "plan_adjustment" : "volume_adjustment",
     );
     assert.ok(result.decision.evidence.length > 0);

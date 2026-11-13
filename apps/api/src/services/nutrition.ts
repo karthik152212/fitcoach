@@ -93,6 +93,16 @@ export class NutritionService {
     return food;
   }
 
+  async searchFoods(
+    query: string,
+    options?: { limit?: number; offset?: number; sourceId?: string }
+  ): Promise<{ foods: FoodRecord[]; total: number }> {
+    if (!query.trim()) {
+      return { foods: [], total: 0 };
+    }
+    return this.repos.foods.searchFoods(query, options);
+  }
+
   /**
    * Compute the frozen snapshot for one consumed item: density × quantity,
    * with confidence taken from the item or its source's default.

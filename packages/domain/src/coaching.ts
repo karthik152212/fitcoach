@@ -2,6 +2,7 @@ import type {
   BaseEntity,
   CalendarDate,
   DiagnosisId,
+  EntityId,
   InterventionId,
   Timestamp,
   UserId,
@@ -118,6 +119,65 @@ export type RecommendationStatus =
   | "acted_on"
   | "dismissed"
   | "expired";
+
+// ---------------------------------------------------------------------------
+// Conversation entity types (Phase 9.1)
+// ---------------------------------------------------------------------------
+
+/** Opaque identifier for a conversation. */
+export type ConversationId = EntityId;
+
+/** Opaque identifier for a conversation message. */
+export type MessageId = EntityId;
+
+/** Opaque identifier for a proposed action. */
+export type ActionId = EntityId;
+
+/** Role of a message sender. */
+export type MessageRole = "user" | "assistant" | "system";
+
+/** Status of a conversation. */
+export type ConversationStatus = "active" | "archived";
+
+/** Status of a proposed action. */
+export type ActionStatus = "pending" | "confirmed" | "rejected" | "executed";
+
+/** Kind of action the AI Coach may propose. */
+export type ActionKind =
+  | "adjust_nutrition_target"
+  | "adjust_training_volume"
+  | "record_measurement"
+  | "update_goal"
+  | "reevaluate_decision"
+  | "log_food"
+  | "log_workout"
+  | "custom";
+
+/**
+ * A conversation transcript between a user and the AI Coach.
+ * Conversations are ephemeral summaries of interaction — they never replace
+ * durable user facts (profile, goals, measurements, etc.).
+ */
+export interface Conversation extends BaseEntity {
+  userId: UserId;
+  title?: string;
+  status: ConversationStatus;
+}
+
+/**
+ * One turn within a conversation.
+ */
+export interface ConversationMessage extends BaseEntity {
+  conversationId: ConversationId;
+  role: MessageRole;
+  content: string;
+  /** Whether this assistant message was produced by a mock provider. */
+  isMock: boolean;
+  /** Provider identity (e.g. "mock", "anthropic", "openai"). */
+  provider?: string;
+  /** Provider model identifier. */
+  model?: string;
+}
 
 /**
  * A user-facing communication of a validated recommendation. Every material

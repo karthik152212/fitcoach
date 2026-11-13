@@ -2,10 +2,16 @@ import type { PrismaClient } from "@prisma/client";
 import type {
   ActivityRepository,
   BodyMeasurementRepository,
+  PhysiqueGoalRepository,
+  RecoveryRepository,
+  SleepRepository,
 } from "./body";
 import {
   PrismaActivityRepository,
   PrismaBodyMeasurementRepository,
+  PrismaPhysiqueGoalRepository,
+  PrismaRecoveryRepository,
+  PrismaSleepRepository,
 } from "./body";
 import type { ExerciseRepository } from "./catalog";
 import { PrismaExerciseRepository } from "./catalog";
@@ -19,6 +25,28 @@ import {
   PrismaInterventionRepository,
   PrismaRecommendationRepository,
 } from "./coaching";
+import type {
+  DecisionSnapshotRepository,
+  DecisionInterventionRepository,
+  DecisionEvidenceRepository,
+  DecisionAssumptionRepository,
+  DecisionOutcomeRepository,
+} from "./decision";
+import {
+  PrismaDecisionSnapshotRepository,
+  PrismaDecisionInterventionRepository,
+  PrismaDecisionEvidenceRepository,
+  PrismaDecisionAssumptionRepository,
+  PrismaDecisionOutcomeRepository,
+} from "./decision";
+import type {
+  ConversationRepository,
+  ConversationMessageRepository,
+} from "./conversation";
+import {
+  PrismaConversationRepository,
+  PrismaConversationMessageRepository,
+} from "./conversation";
 import type { EquipmentRepository } from "./equipment";
 import { PrismaEquipmentRepository } from "./equipment";
 import type { TrainingEnvironmentRepository } from "./environments";
@@ -29,11 +57,12 @@ import type { ProfileRepository, UserRepository } from "./identity";
 import { PrismaProfileRepository, PrismaUserRepository } from "./identity";
 import type { KnowledgeRepository } from "./knowledge";
 import { PrismaKnowledgeRepository } from "./knowledge";
-import type { FoodRepository, MealRepository, NutritionRepository } from "./nutrition";
+import type { FoodRepository, MealRepository, NutritionRepository, RecipeRepository } from "./nutrition";
 import {
   PrismaFoodRepository,
   PrismaMealRepository,
   PrismaNutritionRepository,
+  PrismaRecipeRepository,
 } from "./nutrition";
 import type { ExercisePreferenceRepository } from "./preferences";
 import { PrismaExercisePreferenceRepository } from "./preferences";
@@ -45,6 +74,8 @@ import { PrismaTrainingPlanRepository, PrismaWorkoutRepository } from "./trainin
 export * from "./body";
 export * from "./catalog";
 export * from "./coaching";
+export * from "./decision";
+export * from "./conversation";
 export * from "./equipment";
 export * from "./environments";
 export * from "./goals";
@@ -73,13 +104,24 @@ export interface Repositories {
   progressionLedger: ProgressionLedgerRepository;
   workouts: WorkoutRepository;
   bodyMeasurements: BodyMeasurementRepository;
+  physiqueGoals: PhysiqueGoalRepository;
   activity: ActivityRepository;
+  sleep: SleepRepository;
+  recovery: RecoveryRepository;
   foods: FoodRepository;
   meals: MealRepository;
+  recipes: RecipeRepository;
   nutrition: NutritionRepository;
   diagnoses: DiagnosisRepository;
   recommendations: RecommendationRepository;
   interventions: InterventionRepository;
+  decisionSnapshots: DecisionSnapshotRepository;
+  decisionInterventions: DecisionInterventionRepository;
+  decisionEvidence: DecisionEvidenceRepository;
+  decisionAssumptions: DecisionAssumptionRepository;
+  decisionOutcomes: DecisionOutcomeRepository;
+  conversations: ConversationRepository;
+  conversationMessages: ConversationMessageRepository;
 }
 
 /** Dependency-injection factory: application code depends on `Repositories`. */
@@ -97,12 +139,23 @@ export function createRepositories(prisma: PrismaClient): Repositories {
     progressionLedger: new PrismaProgressionLedgerRepository(prisma),
     workouts: new PrismaWorkoutRepository(prisma),
     bodyMeasurements: new PrismaBodyMeasurementRepository(prisma),
+    physiqueGoals: new PrismaPhysiqueGoalRepository(prisma),
     activity: new PrismaActivityRepository(prisma),
+    sleep: new PrismaSleepRepository(prisma),
+    recovery: new PrismaRecoveryRepository(prisma),
     foods: new PrismaFoodRepository(prisma),
     meals: new PrismaMealRepository(prisma),
+    recipes: new PrismaRecipeRepository(prisma),
     nutrition: new PrismaNutritionRepository(prisma),
     diagnoses: new PrismaDiagnosisRepository(prisma),
     recommendations: new PrismaRecommendationRepository(prisma),
     interventions: new PrismaInterventionRepository(prisma),
+    decisionSnapshots: new PrismaDecisionSnapshotRepository(prisma),
+    decisionInterventions: new PrismaDecisionInterventionRepository(prisma),
+    decisionEvidence: new PrismaDecisionEvidenceRepository(prisma),
+    decisionAssumptions: new PrismaDecisionAssumptionRepository(prisma),
+    decisionOutcomes: new PrismaDecisionOutcomeRepository(prisma),
+    conversations: new PrismaConversationRepository(prisma),
+    conversationMessages: new PrismaConversationMessageRepository(prisma),
   };
 }

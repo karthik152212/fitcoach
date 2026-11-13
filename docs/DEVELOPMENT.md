@@ -37,6 +37,12 @@ fitcoach/
 - Copy `.env.example` to `.env` at the repository root and set
   `DATABASE_URL` (and optionally `PORT`, `FITCOACH_TEST_DATABASE_URL`).
   `.env` is gitignored.
+- The API refuses to start without `DATABASE_URL`, so an unreachable database
+  shows up in the UI as proxy failures (`connect ECONNREFUSED 127.0.0.1:8787`).
+  `npm run dev` / `npm run dev:api` avoid that: when `DATABASE_URL` is unset or
+  nothing is listening on it, they start an embedded PostgreSQL cluster in
+  `.devstack/pg` (the binary the database tests already use), apply migrations,
+  seed, and then run the API on 8787.
 - Root scripts (`db:*`, `api:start`, `test`) and workspace scripts load this
   file via Node's `--env-file-if-exists` (Node ≥ 22.9 — see `engines`).
 - The Prisma CLI reads `.env` only from its working directory, so use the
@@ -68,9 +74,16 @@ Run from the repository root:
 | `npm run db:migrate:dev` | Create/apply Prisma migrations against `DATABASE_URL`. |
 | `npm run db:migrate:deploy` | Apply pending migrations (non-interactive). |
 | `npm run db:seed` | Build, then run the idempotent development seed. |
-| `npm run api:start` | Build and run the API on port 8787 (`PORT` env var overrides). |
+| `npm run api:start` | Build and run the API on port 8787 (`PORT` env var overrides). Requires a reachable database. |
+| `npm run dev` | Everything for local work: database (embedded when needed), migrations, seed, API on 8787, and the UI on 5173. |
+| `npm run dev:api` | The same stack without the UI — keep running, then use `npm run dev:web` in another terminal. |
 | `npm run test:integration -w @fitcoach/db` | DB integration tests — boots PostgreSQL (embedded or `FITCOACH_TEST_DATABASE_URL`). |
 | `npm run test:smoke -w @fitcoach/api` | HTTP smoke test over real services and a real database. |
+| `npm run dev:web` | Run only the product UI on port 5173 (proxies `/v0` to the API on 8787, which must be running — see `npm run dev:api`). |
+| `npm run test:web` | UI tests (Vitest + Testing Library, jsdom). |
+| `npm run test:e2e` | End-to-end tests (Playwright) in a real browser: the primary journey plus responsive and keyboard checks. Boots the Vite dev server and serves recorded `/v0` responses, so no database or API process is needed. |
+| `npm run test:e2e:ui` | The same suite in Playwright's watch/debug UI. |
+| `npm run build -w @fitcoach/web` | Production build of the UI into `apps/web/dist`. |
 
 Tests use `node:test` and `node:assert` only — zero test-framework
 dependencies. Unit test files live next to sources as
@@ -88,6 +101,8 @@ database. Full database documentation: docs/DATABASE_IMPLEMENTATION.md.
 | `docs/DATABASE_DESIGN.md` | Persistence design + the V2 supported-vs-deferred review (§23) |
 | `docs/DATABASE_IMPLEMENTATION.md` | What actually runs today (Phase 1) + divergences |
 | `docs/OPEN_SOURCE_AUDIT.md` | Third-party code/data audit and license boundary |
+| `docs/UI_UX_PRINCIPLES.md` | The design constitution for the product UI |
+| `docs/FRONTEND_ARCHITECTURE.md` | How the Phase 4 UI is built (stack, routing, anatomy, theme, tests) |
 | `data/provenance/THIRD_PARTY.md` | Register of every third-party component/dataset |
 | `packages/*/src/README.md`, `packages/domain/src/entities.md` | Per-package boundaries and entity plans |
 

@@ -127,7 +127,7 @@ export function distributeFrequency(
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
   // Distribute each muscle across sessions
-  for (const [muscleSlug, weeklyVolume] of sortedMuscles) {
+  for (const [muscleIndex, [muscleSlug, weeklyVolume]] of sortedMuscles.entries()) {
     const target = getMuscleFrequencyTarget(muscleSlug, goalProfile, weeklyVolume, experience);
     if (!target) {
       warnings.push(`No frequency target for muscle: ${muscleSlug}`);
@@ -143,6 +143,7 @@ export function distributeFrequency(
       desiredFrequency,
       availableSessions,
       splitType,
+      muscleIndex,
     );
 
     for (const sessionIdx of chosenSessions) {
@@ -189,15 +190,22 @@ function chooseSessionsForMuscle(
   desiredFrequency: number,
   availableSessions: number,
   splitType: string,
+  /** Stable per-muscle offset so identical weekly volumes spread across the week. */
+  rotation = 0,
 ): number[] {
   const chosen: number[] = [];
 
-  // For full body: every session
+  // For full body: a muscle that trains less often than every session must not
+  // always take the first sessions of the week. Without the rotation offset
+  // every muscle lands in sessions 0..k-1, which leaves the last session with
+  // no muscle at all — reported downstream as "no eligible exercise" and, with
+  // three days a week, as an infeasible plan.
   if (splitType === "full_body" || splitType === "upper_lower_full_body") {
-    for (let i = 0; i < availableSessions && chosen.length < desiredFrequency; i++) {
-      chosen.push(i);
+    const start = ((rotation % availableSessions) + availableSessions) % availableSessions;
+    for (let step = 0; step < availableSessions && chosen.length < desiredFrequency; step++) {
+      chosen.push((start + step) % availableSessions);
     }
-    return chosen;
+    return chosen.sort((a, b) => a - b);
   }
 
   // For upper/lower: alternate sessions

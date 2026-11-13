@@ -17,6 +17,7 @@
     "test:no-equipment-week": "node --env-file-if-exists=../.env dist/__tests__/noEquipmentWeek.js"
   },
   "dependencies": {
+    "@fitcoach/ai": "*",
     "@fitcoach/db": "*",
     "@fitcoach/domain": "*",
     "@fitcoach/nutrition": "*",

@@ -1,13 +1,12 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type {
-  ExercisePerformanceSummary,
-  PerformanceObservationSummary,
-  ProgressionActualChange,
   ProgressionDecisionEvent,
   ProgressionDecisionKind,
   ProgressionEvaluation,
   ProgressionEvaluationOutcome,
   ProgressionRecommendation,
+  PerformanceObservationSummary,
+  ExercisePerformanceSummary,
   TrainingEnvironmentKind,
 } from "@fitcoach/domain";
 import { NotFoundError } from "../errors";
@@ -18,18 +17,15 @@ import { boundedLimit, runDb } from "./util";
 /**
  * Progression ledger (Phase 3.1 §9–§10).
  *
- * Two append-only tables:
+ * Two append-only tables matching the Prisma schema:
  *
- *   progression_evaluations     — what was evaluated, from what evidence, and
- *                                 the deterministic recommendation produced.
+ *   progression_evaluations     — full evaluation with observations, performance,
+ *                                 outcome, recommendation, evidence, fingerprint.
  *   progression_decision_events — what the user did about it (accepted /
  *                                 rejected / deferred) and, later, what the
  *                                 performance actually was.
  *
- * Neither table has an update path. A changed mind is a new event row; that is
- * precisely what makes "recommended", "accepted" and "actually performed"
- * distinguishable forever, and what makes `progressionsCompleted` a real count
- * rather than a counter someone increments.
+ * Neither table has an update path. A changed mind is a new event row.
  */
 
 export interface RecordEvaluationInput {
@@ -41,13 +37,13 @@ export interface RecordEvaluationInput {
   planVersionId?: string;
   slotId?: string;
   environmentKind?: TrainingEnvironmentKind;
-  outcome: ProgressionEvaluationOutcome;
   currentObservation: PerformanceObservationSummary;
   previousObservation?: PerformanceObservationSummary;
   performance: ExercisePerformanceSummary;
+  outcome: ProgressionEvaluationOutcome;
   recommendation: ProgressionRecommendation;
   evidence?: readonly string[];
-  /** Deterministic dedupe key; identical inputs produce the same key. */
+  /** Deterministic dedupe key: identical inputs produce the same key. */
   fingerprint: string;
   configVersion: string;
 }
@@ -57,21 +53,19 @@ export interface RecordDecisionEventInput {
   evaluationId: string;
   decision: ProgressionDecisionKind;
   reason?: string;
-  /** Submission idempotency key; a retry does not create a second event. */
   idempotencyKey?: string;
-  actualChange?: ProgressionActualChange;
-  resultingPerformance?: PerformanceObservationSummary;
+  actualChange?: Prisma.InputJsonValue;
+  resultingPerformance?: Prisma.InputJsonValue;
   evidence?: readonly string[];
 }
 
 export interface ProgressionLedgerQuery {
-  exerciseId?: string;
-  planId?: string;
+  userId?: string;
   planVersionId?: string;
+  slotId?: string;
   limit?: number;
 }
 
-/** An evaluation with its (append-only) events, oldest event first. */
 export interface ProgressionLedgerRow {
   evaluation: ProgressionEvaluation;
   events: ProgressionDecisionEvent[];
@@ -100,10 +94,10 @@ interface EvaluationRow {
   planVersionId: string | null;
   slotId: string | null;
   environmentKind: string | null;
-  outcome: string;
-  currentObservation: Prisma.JsonValue;
-  previousObservation: Prisma.JsonValue | null;
+  current: Prisma.JsonValue;
+  previous: Prisma.JsonValue | null;
   performance: Prisma.JsonValue;
+  outcome: string;
   recommendation: Prisma.JsonValue;
   evidence: string[];
   fingerprint: string;
@@ -127,17 +121,17 @@ function evaluationRowToRecord(row: EvaluationRow): ProgressionEvaluation {
   return {
     id: row.id,
     userId: row.userId,
-    exerciseId: row.exerciseId,
+    exerciseId: row.exerciseId as any,
     exerciseName: row.exerciseName,
-    ...(row.planId ? { planId: row.planId } : {}),
-    ...(row.planVersionId ? { planVersionId: row.planVersionId } : {}),
-    ...(row.slotId ? { slotId: row.slotId } : {}),
+    ...(row.planId ? { planId: row.planId as any } : {}),
+    ...(row.planVersionId ? { planVersionId: row.planVersionId as any } : {}),
+    ...(row.slotId ? { slotId: row.slotId as any } : {}),
     ...(row.environmentKind
       ? { environmentKind: row.environmentKind as TrainingEnvironmentKind }
       : {}),
-    current: row.currentObservation as unknown as PerformanceObservationSummary,
-    ...(row.previousObservation
-      ? { previous: row.previousObservation as unknown as PerformanceObservationSummary }
+    current: row.current as unknown as PerformanceObservationSummary,
+    ...(row.previous
+      ? { previous: row.previous as unknown as PerformanceObservationSummary }
       : {}),
     performance: row.performance as unknown as ExercisePerformanceSummary,
     outcome: row.outcome as ProgressionEvaluationOutcome,
@@ -153,16 +147,16 @@ function eventRowToRecord(row: EventRow): ProgressionDecisionEvent {
   return {
     id: row.id,
     evaluationId: row.evaluationId,
-    ...(row.idempotencyKey ? { idempotencyKey: row.idempotencyKey } : {}),
     decision: row.decision as ProgressionDecisionKind,
-    ...(row.reason ? { reason: row.reason } : {}),
+    ...(row.reason !== null ? { reason: row.reason } : {}),
+    ...(row.idempotencyKey ? { idempotencyKey: row.idempotencyKey } : {}),
     ...(row.actualChange
-      ? { actualChange: row.actualChange as unknown as ProgressionActualChange }
+      ? { actualChange: row.actualChange as unknown as ProgressionDecisionEvent["actualChange"] }
       : {}),
     ...(row.resultingPerformance
       ? {
           resultingPerformance:
-            row.resultingPerformance as unknown as PerformanceObservationSummary,
+            row.resultingPerformance as unknown as ProgressionDecisionEvent["resultingPerformance"],
         }
       : {}),
     evidence: [...row.evidence],
@@ -200,12 +194,12 @@ export class PrismaProgressionLedgerRepository implements ProgressionLedgerRepos
             planVersionId: input.planVersionId ?? null,
             slotId: input.slotId ?? null,
             environmentKind: input.environmentKind ?? null,
-            outcome: input.outcome,
-            currentObservation: input.currentObservation as unknown as Prisma.InputJsonValue,
-            previousObservation: (input.previousObservation ?? undefined) as
+            current: input.currentObservation as unknown as Prisma.InputJsonValue,
+            previous: (input.previousObservation ?? undefined) as
               | Prisma.InputJsonValue
               | undefined,
             performance: input.performance as unknown as Prisma.InputJsonValue,
+            outcome: input.outcome,
             recommendation: input.recommendation as unknown as Prisma.InputJsonValue,
             evidence: [...(input.evidence ?? [])],
             fingerprint: input.fingerprint,
@@ -238,7 +232,6 @@ export class PrismaProgressionLedgerRepository implements ProgressionLedgerRepos
       });
       if (!row) return null;
       const record = evaluationRowToRecord(row as EvaluationRow);
-      // Ownership is part of the read model: a mismatched user sees nothing.
       return record.userId === userId ? record : null;
     });
   }
@@ -251,9 +244,8 @@ export class PrismaProgressionLedgerRepository implements ProgressionLedgerRepos
       const rows = await this.prisma.progressionEvaluation.findMany({
         where: {
           userId,
-          ...(query.exerciseId ? { exerciseId: query.exerciseId } : {}),
-          ...(query.planId ? { planId: query.planId } : {}),
           ...(query.planVersionId ? { planVersionId: query.planVersionId } : {}),
+          ...(query.slotId ? { slotId: query.slotId } : {}),
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: boundedLimit(query.limit, 100),
@@ -286,12 +278,10 @@ export class PrismaProgressionLedgerRepository implements ProgressionLedgerRepos
             id,
             evaluationId: input.evaluationId,
             decision: input.decision,
-            reason: input.reason ?? null,
-            idempotencyKey: input.idempotencyKey ?? null,
-            actualChange: (input.actualChange ?? undefined) as Prisma.InputJsonValue | undefined,
-            resultingPerformance: (input.resultingPerformance ?? undefined) as
-              | Prisma.InputJsonValue
-              | undefined,
+            reason: input.reason ?? undefined,
+            idempotencyKey: input.idempotencyKey ?? undefined,
+            actualChange: input.actualChange ?? undefined,
+            resultingPerformance: input.resultingPerformance ?? undefined,
             evidence: [...(input.evidence ?? [])],
           },
         });
@@ -341,9 +331,8 @@ export class PrismaProgressionLedgerRepository implements ProgressionLedgerRepos
       const rows = await this.prisma.progressionEvaluation.findMany({
         where: {
           userId,
-          ...(query.exerciseId ? { exerciseId: query.exerciseId } : {}),
-          ...(query.planId ? { planId: query.planId } : {}),
           ...(query.planVersionId ? { planVersionId: query.planVersionId } : {}),
+          ...(query.slotId ? { slotId: query.slotId } : {}),
         },
         include: {
           events: { orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }] },

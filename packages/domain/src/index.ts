@@ -10,3 +10,5 @@ export * from "./training";
 export * from "./body";
 export * from "./nutrition";
 export * from "./coaching";
+export * from "./projection";
+export * from "./decision";
