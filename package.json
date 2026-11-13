@@ -12,19 +12,26 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && npm run typecheck -w @fitcoach/web",
     "build": "tsc -b tsconfig.build.json",
     "test": "npm run build && node --env-file-if-exists=.env --test \"**/dist/**/*.test.js\"",
-    "lint": "echo \"lint: placeholder (no linter configured yet)\"",
+    "test:web": "npm run test -w @fitcoach/web",
+    "lint": "echo \"lint: placeholder (no linter configured yet)\" && exit 0",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:validate": "prisma validate --schema packages/db/prisma/schema.prisma",
     "db:migrate:dev": "prisma migrate dev --schema packages/db/prisma/schema.prisma",
     "db:migrate:deploy": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",
     "db:migrate:status": "prisma migrate status --schema packages/db/prisma/schema.prisma",
     "db:seed": "npm run build && node --env-file-if-exists=.env packages/db/dist/seed/cli.js",
-    "api:start": "npm run build && node --env-file-if-exists=.env apps/api/dist/index.js"
+    "api:start": "npm run build && node --env-file-if-exists=.env apps/api/dist/index.js",
+    "dev": "node scripts/dev-stack.mjs --web",
+    "dev:api": "node scripts/dev-stack.mjs",
+    "dev:web": "npm run dev -w @fitcoach/web",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }
