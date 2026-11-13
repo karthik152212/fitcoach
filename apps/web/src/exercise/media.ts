@@ -1,0 +1,410 @@
+/**
+ * Exercise media registry.
+ *
+ * Every entry is a reviewed photograph of the same movement the exercise id
+ * names, keyed by catalogue slug. Assets come from free-exercise-db, an open
+ * public-domain dataset released under the Unlicense; `source` records the
+ * exact file so provenance can be checked. Where the dataset provides two
+ * frames, the working position is shipped rather than the set-up frame.
+ *
+ * An exercise with no entry renders the anatomy figure instead of a
+ * placeholder or a stock photo of a different movement — see
+ * docs/EXERCISE_ASSETS.md for the shipped inventory.
+ */
+
+export interface ExerciseMediaAsset {
+  /** Path under `/exercise-media/`, or an absolute, reviewed CDN URL. */
+  src: string;
+  /** Intrinsic size, used to reserve the box before the file loads. */
+  width: number;
+  height: number;
+  /** Describe the position being shown — required, never decorative. */
+  alt: string;
+  /** Where the asset comes from; required so provenance cannot be lost. */
+  source: string;
+  /** Licence or written permission, in words a reviewer can check. */
+  licence: string;
+}
+
+export const EXERCISE_MEDIA: Readonly<Record<string, ExerciseMediaAsset>> = {
+  "barbell_bench_press": {
+    src: "/exercise-media/barbell_bench_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Bar lowered to the chest on a flat bench, elbows tucked",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Barbell_Bench_Press_-_Medium_Grip/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "incline_dumbbell_press": {
+    src: "/exercise-media/incline_dumbbell_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Dumbbells pressed overhead from an incline bench, back on the pad",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Incline_Dumbbell_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "machine_chest_press": {
+    src: "/exercise-media/machine_chest_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Seated at a chest press machine with the handles pressed forward",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Machine_Bench_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "cable_fly": {
+    src: "/exercise-media/cable_fly.jpg",
+    width: 850,
+    height: 567,
+    alt: "Cable handles brought together in front of the chest",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Cable_Crossover/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "push_up": {
+    src: "/exercise-media/push_up.jpg",
+    width: 850,
+    height: 567,
+    alt: "Chest lowered close to the floor in a push-up, body in a straight line",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Pushups/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "barbell_overhead_press": {
+    src: "/exercise-media/barbell_overhead_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Barbell locked out overhead, standing tall",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Standing_Military_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "dumbbell_seated_shoulder_press": {
+    src: "/exercise-media/dumbbell_seated_shoulder_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Dumbbells pressed overhead while seated against the bench back",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Dumbbell_Shoulder_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "dumbbell_lateral_raise": {
+    src: "/exercise-media/dumbbell_lateral_raise.jpg",
+    width: 850,
+    height: 567,
+    alt: "Dumbbells raised out to the sides at shoulder height",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Side_Lateral_Raise/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "face_pull": {
+    src: "/exercise-media/face_pull.jpg",
+    width: 850,
+    height: 567,
+    alt: "Rope pulled towards the face with the elbows high",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Face_Pull/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "bent_over_dumbbell_reverse_fly": {
+    src: "/exercise-media/bent_over_dumbbell_reverse_fly.jpg",
+    width: 850,
+    height: 567,
+    alt: "Hinged over a bench with dumbbells raised out to the sides",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Reverse_Flyes/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "lat_pulldown_wide_grip": {
+    src: "/exercise-media/lat_pulldown_wide_grip.jpg",
+    width: 850,
+    height: 567,
+    alt: "Wide bar pulled to the upper chest while seated",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Wide-Grip_Lat_Pulldown/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "lat_pulldown_neutral_grip": {
+    src: "/exercise-media/lat_pulldown_neutral_grip.jpg",
+    width: 850,
+    height: 567,
+    alt: "V-bar pulled to the chest with a neutral grip",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/V-Bar_Pulldown/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "cable_pulldown_single_arm": {
+    src: "/exercise-media/cable_pulldown_single_arm.jpg",
+    width: 850,
+    height: 567,
+    alt: "One handle pulled down to shoulder height with a single arm",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/One_Arm_Lat_Pulldown/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "pull_up": {
+    src: "/exercise-media/pull_up.jpg",
+    width: 850,
+    height: 567,
+    alt: "Chin over the bar at the top of a pull-up",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Pullups/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "barbell_bent_over_row": {
+    src: "/exercise-media/barbell_bent_over_row.jpg",
+    width: 850,
+    height: 567,
+    alt: "Barbell rowed to the midsection with a flat back",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Bent_Over_Barbell_Row/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "seated_cable_row": {
+    src: "/exercise-media/seated_cable_row.jpg",
+    width: 850,
+    height: 567,
+    alt: "Handle pulled into the midsection while seated with the legs long",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Seated_Cable_Rows/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "chest_supported_dumbbell_row": {
+    src: "/exercise-media/chest_supported_dumbbell_row.jpg",
+    width: 850,
+    height: 567,
+    alt: "Chest supported on an incline bench with the dumbbells rowed up",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Dumbbell_Incline_Row/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "straight_arm_cable_pulldown": {
+    src: "/exercise-media/straight_arm_cable_pulldown.jpg",
+    width: 850,
+    height: 567,
+    alt: "Straight arms pressing the bar down to the thighs",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Straight-Arm_Pulldown/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "barbell_curl": {
+    src: "/exercise-media/barbell_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "Barbell curled to chest height with the elbows at the sides",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Barbell_Curl/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "incline_dumbbell_curl": {
+    src: "/exercise-media/incline_dumbbell_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "Dumbbells curled while lying back on an incline bench",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Incline_Dumbbell_Curl/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "preacher_curl": {
+    src: "/exercise-media/preacher_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "EZ bar curled with the upper arms resting on the preacher pad",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Preacher_Curl/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "spider_curl": {
+    src: "/exercise-media/spider_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "Chest down on an incline bench curling an EZ bar",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Spider_Curl/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "hammer_curl": {
+    src: "/exercise-media/hammer_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "Dumbbells curled with a neutral, palms-in grip",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Hammer_Curls/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "cable_curl_underhand": {
+    src: "/exercise-media/cable_curl_underhand.jpg",
+    width: 850,
+    height: 567,
+    alt: "Cable handle curled to the chest with an underhand grip",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Standing_Biceps_Cable_Curl/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "close_grip_bench_press": {
+    src: "/exercise-media/close_grip_bench_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Barbell pressed from a flat bench with the hands close together",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Close-Grip_Barbell_Bench_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "skull_crusher_ez_bar": {
+    src: "/exercise-media/skull_crusher_ez_bar.jpg",
+    width: 750,
+    height: 500,
+    alt: "EZ bar lowered towards the forehead while lying on a bench",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/EZ-Bar_Skullcrusher/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "overhead_cable_extension": {
+    src: "/exercise-media/overhead_cable_extension.jpg",
+    width: 850,
+    height: 567,
+    alt: "Rope extended overhead, facing away from the cable stack",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Cable_Rope_Overhead_Triceps_Extension/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "cable_triceps_pushdown": {
+    src: "/exercise-media/cable_triceps_pushdown.jpg",
+    width: 850,
+    height: 567,
+    alt: "Bar pressed down to straight arms with the elbows pinned to the sides",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Triceps_Pushdown/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "barbell_back_squat": {
+    src: "/exercise-media/barbell_back_squat.jpg",
+    width: 850,
+    height: 567,
+    alt: "Barbell back squat at depth with the bar across the upper back",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Barbell_Squat/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "goblet_front_squat": {
+    src: "/exercise-media/goblet_front_squat.jpg",
+    width: 850,
+    height: 569,
+    alt: "Kettlebell held at the chest at the bottom of a squat",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Goblet_Squat/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "leg_press": {
+    src: "/exercise-media/leg_press.jpg",
+    width: 850,
+    height: 567,
+    alt: "Legs pressing the platform away in a leg press",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Leg_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "romanian_deadlift": {
+    src: "/exercise-media/romanian_deadlift.jpg",
+    width: 850,
+    height: 567,
+    alt: "Hinged at the hips with a flat back, barbell at the shins",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Romanian_Deadlift/0.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "leg_extension": {
+    src: "/exercise-media/leg_extension.jpg",
+    width: 850,
+    height: 567,
+    alt: "Knees extended against the pad in a leg extension machine",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Leg_Extensions/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "lying_leg_curl": {
+    src: "/exercise-media/lying_leg_curl.jpg",
+    width: 850,
+    height: 567,
+    alt: "Heels curled towards the glutes on a lying leg curl machine",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Lying_Leg_Curls/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "hip_thrust": {
+    src: "/exercise-media/hip_thrust.jpg",
+    width: 850,
+    height: 567,
+    alt: "Hips extended with the barbell across the hips and upper back on a bench",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Barbell_Hip_Thrust/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "seated_calf_raise": {
+    src: "/exercise-media/seated_calf_raise.jpg",
+    width: 850,
+    height: 567,
+    alt: "Seated in a calf raise machine with the knees under the pad",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Seated_Calf_Raise/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "plank": {
+    src: "/exercise-media/plank.jpg",
+    width: 850,
+    height: 567,
+    alt: "Forearm plank held with a straight line from head to heels",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Plank/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "dead_bug": {
+    src: "/exercise-media/dead_bug.jpg",
+    width: 1280,
+    height: 720,
+    alt: "Lying on the back with the opposite arm and leg extended",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Dead_Bug/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "pallof_press": {
+    src: "/exercise-media/pallof_press.jpg",
+    width: 1280,
+    height: 720,
+    alt: "Cable handle pressed away from the chest while standing side-on",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Pallof_Press/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "bodyweight_squat": {
+    src: "/exercise-media/bodyweight_squat.jpg",
+    width: 850,
+    height: 567,
+    alt: "Bodyweight squat with the hands behind the head",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Bodyweight_Squat/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "walking_lunge": {
+    src: "/exercise-media/walking_lunge.jpg",
+    width: 850,
+    height: 567,
+    alt: "Walking lunge with the back knee lowered",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Bodyweight_Walking_Lunge/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "glute_bridge": {
+    src: "/exercise-media/glute_bridge.jpg",
+    width: 850,
+    height: 567,
+    alt: "Hips lifted with the feet planted in a glute bridge",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Butt_Lift_Bridge/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "single_leg_glute_bridge": {
+    src: "/exercise-media/single_leg_glute_bridge.jpg",
+    width: 850,
+    height: 567,
+    alt: "Bridging on one leg with the other leg extended",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Single_Leg_Glute_Bridge/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "superman_hold": {
+    src: "/exercise-media/superman_hold.jpg",
+    width: 850,
+    height: 567,
+    alt: "Arms and legs lifted off the floor in a superman hold",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Superman/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "side_plank": {
+    src: "/exercise-media/side_plank.jpg",
+    width: 850,
+    height: 567,
+    alt: "Side plank held on one forearm with the hips lifted",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Side_Bridge/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "reverse_crunch": {
+    src: "/exercise-media/reverse_crunch.jpg",
+    width: 850,
+    height: 567,
+    alt: "Knees curled towards the chest with the hips lifting off the floor",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Reverse_Crunch/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+  "diamond_push_up": {
+    src: "/exercise-media/diamond_push_up.jpg",
+    width: 850,
+    height: 567,
+    alt: "Close-hand push-up with the chest lowered near the floor",
+    source: "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/Push-Ups_-_Close_Triceps_Position/1.jpg",
+    licence: "Unlicense (public domain) — free-exercise-db, derived from wrkout/exercises.json",
+  },
+};
+
+export function mediaFor(exerciseSlug: string): ExerciseMediaAsset | undefined {
+  return EXERCISE_MEDIA[exerciseSlug];
+}

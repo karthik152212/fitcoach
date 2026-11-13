@@ -64,11 +64,21 @@ export function resetBrowserSupabase(): void {
 }
 
 /**
+ * Sign out the current user.
+ */
+export async function signOut(): Promise<void> {
+  const supabase = getBrowserSupabase();
+  await supabase.auth.signOut();
+}
+
+/**
  * Get the current session from the browser client.
  * Returns null if not authenticated or Supabase not configured.
  */
 export async function getBrowserSession(): Promise<{
   accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
   user: { id: string; email?: string };
 } | null> {
   try {
@@ -77,6 +87,8 @@ export async function getBrowserSession(): Promise<{
     if (!session) return null;
     return {
       accessToken: session.access_token,
+      refreshToken: session.refresh_token ?? "",
+      expiresAt: (session.expires_at ?? 0) * 1000,
       user: { id: session.user.id, email: session.user.email ?? undefined },
     };
   } catch {

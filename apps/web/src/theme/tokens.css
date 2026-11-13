@@ -1,0 +1,131 @@
+/**
+ * FitCoach semantic design tokens.
+ *
+ * Themes follow the device only (prefers-color-scheme) — there is no in-app
+ * selector, per docs/UI_UX_PRINCIPLES.md §19. Components must consume these
+ * semantic tokens; no raw hex values in components.
+ *
+ * PROVISIONAL: `--accent` and `--anatomy-target` are development values
+ * behind semantic tokens, intentionally not the final brand decision (§20).
+ */
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --background: #f6f5f2;
+  --surface: #fdfdfc;
+  --surface-elevated: #ffffff;
+
+  /* Text */
+  --text-primary: #15181c;
+  --text-secondary: #454c54;
+  /* AA for normal text on every light surface (4.65–5.07:1). */
+  --text-muted: #686f79;
+
+  /* Lines */
+  --border: #e2e0da;
+  --border-strong: #cfccc4;
+
+  /* State */
+  --success: #33744f;
+  /* Warning is also small text (limitation labels), so it clears AA on the
+     page background as well as on surfaces. */
+  --warning: #7f5f18;
+  --important: #a85a26;
+  --error: #a83a3a;
+
+  /* Interactive (provisional) */
+  --accent: #2e5a68;
+  --accent-soft: #e3ecef;
+  --accent-contrast: #f7fafa;
+  --interactive: var(--accent);
+  --focus: #2e5a68;
+
+  /* Anatomy (provisional target color) */
+  --anatomy-base: #c9c5bc;
+  --anatomy-base-line: #8f8b82;
+  --anatomy-figure-line: #a5a198;
+  --anatomy-neutral: #b3afa6;
+  --anatomy-target: #c24a3e;
+  --anatomy-target-secondary: #cf7a6f;
+  --anatomy-target-supporting: #dca89f;
+
+  /* Anatomy highlight opacity steps by target state */
+  --anatomy-highlight-primary: 1;
+  --anatomy-highlight-secondary: 0.72;
+  --anatomy-highlight-supporting: 0.45;
+  --anatomy-highlight-stabilizer: 0.3;
+
+  /* Elevation */
+  --shadow-elevated: 0 1px 2px rgb(21 24 28 / 0.05), 0 6px 24px -12px rgb(21 24 28 / 0.18);
+  --shadow-overlay: 0 8px 40px -8px rgb(21 24 28 / 0.3);
+
+  /* Shape */
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 16px;
+
+  /* Type */
+  --font-family: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 320ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layout */
+  --shell-max: 1080px;
+  --nav-height: 60px;
+  --touch-target: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --background: #0d0f12;
+    --surface: #14171b;
+    --surface-elevated: #1a1e24;
+
+    --text-primary: #ecedef;
+    --text-secondary: #b3b9c1;
+    --text-muted: #868f9a;
+
+    --border: #242a31;
+    --border-strong: #333a43;
+
+    --success: #5fa87f;
+    --warning: #c9a44a;
+    --important: #cf8850;
+    --error: #cf6b6b;
+
+    --accent: #7fa9ba;
+    --accent-soft: #1d2b31;
+    --accent-contrast: #0d1417;
+    --interactive: var(--accent);
+    --focus: #7fa9ba;
+
+    /* Quiet, but legible: the musculature must still read as anatomy against
+       a near-black surface, or the target highlight has nothing to sit in. */
+    --anatomy-base: #444a52;
+    --anatomy-base-line: #6b727c;
+    --anatomy-figure-line: #565d66;
+    --anatomy-neutral: #4b515a;
+    --anatomy-target: #d9635a;
+    --anatomy-target-secondary: #c98781;
+    --anatomy-target-supporting: #a97671;
+
+    --shadow-elevated: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 28px -12px rgb(0 0 0 / 0.55);
+    --shadow-overlay: 0 12px 48px -8px rgb(0 0 0 / 0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --motion-slow: 0ms;
+  }
+}

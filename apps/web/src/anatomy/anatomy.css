@@ -1,0 +1,70 @@
+/* FitCoach anatomy renderer */
+
+.fc-anatomy {
+  display: inline-flex;
+  position: relative;
+}
+
+.fc-anatomy--interactive {
+  border-radius: var(--radius-l);
+  transition:
+    transform var(--motion-base) var(--motion-ease),
+    filter var(--motion-base) var(--motion-ease);
+}
+
+.fc-anatomy--interactive:hover {
+  transform: scale(1.015);
+}
+
+.fc-anatomy__guide-hint {
+  position: absolute;
+  inset: auto 8px 8px auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  font-size: 0.625rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.fc-anatomy__silhouette {
+  fill: var(--anatomy-base);
+  opacity: 0.28;
+  stroke: var(--anatomy-figure-line);
+  stroke-width: 1.2;
+}
+
+.fc-anatomy__region {
+  fill: var(--anatomy-neutral);
+  stroke: var(--anatomy-base-line);
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+  transition:
+    fill var(--motion-base) var(--motion-ease),
+    opacity var(--motion-base) var(--motion-ease);
+}
+
+.fc-anatomy__region[data-state="primary"] {
+  fill: var(--anatomy-target);
+  opacity: var(--anatomy-highlight-primary);
+  stroke: var(--anatomy-target);
+}
+
+.fc-anatomy__region[data-state="secondary"] {
+  fill: var(--anatomy-target-secondary);
+  opacity: var(--anatomy-highlight-secondary);
+}
+
+.fc-anatomy__region[data-state="supporting"] {
+  fill: var(--anatomy-target-supporting);
+  opacity: var(--anatomy-highlight-supporting);
+}
+
+.fc-anatomy__region[data-state="stabilizer"] {
+  fill: var(--anatomy-target-supporting);
+  opacity: var(--anatomy-highlight-stabilizer);
+}

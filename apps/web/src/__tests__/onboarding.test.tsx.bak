@@ -1,0 +1,114 @@
+/**
+ * FitCoach onboarding acceptance tests.
+ *
+ * Covers: progressive interview → goal → environment → equipment → engine
+ * builds first plan → signed in → Home.
+ */
+
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { render, screen, within, waitFor, cleanup } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
+import { OnboardingScreen } from "../screens/OnboardingScreen";
+import { HomeScreen } from "../screens/HomeScreen";
+import { SessionProvider } from "../session/SessionContext";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { mockApi, TEST_USER } from "./mockApi";
+import type { GoalKind } from "../api/types";
+
+const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function mockOnboardingApi(goal: GoalKind = "general_fitness") {
+  mockApi([
+    { method: "GET", path: "/v0/equipment", body: { equipment: [] } },
+    { method: "POST", path: "/v0/users", body: { user: { id: TEST_USER, displayName: "Ada", timezone: "UTC" } } },
+    { method: "PUT", path: `/v0/users/${TEST_USER}/profile`, body: { profile: {} } },
+    { method: "POST", path: `/v0/users/${TEST_USER}/measurements`, body: {} },
+    { method: "POST", path: `/v0/users/${TEST_USER}/goals`, body: { goal: { id: "g-1", kind: goal, status: "active", description: undefined, priorities: undefined, effectiveFrom: "2026-01-01" } } },
+    { method: "POST", path: `/v0/users/${TEST_USER}/training-plans/generate`, body: { feasibility: "feasible", plan: { id: "p-1", kind: "standard", versions: [] } } },
+    { method: "GET", path: `/v0/users/${TEST_USER}/training-plans/active`, body: { plan: { id: "p-1", kind: "standard", status: "active", versions: [{ id: "v-1", planId: "p-1", versionNumber: 1, status: "active", startsOn: "2026-01-01", sessions: [] }] } } },
+    { method: "GET", path: `/v0/users/${TEST_USER}/training-state`, body: { trainingState: { currentPlanVersionId: "v-1", currentPlanStatus: "active", trainingGoalKind: "bodybuilding" } } },
+    { method: "GET", path: `/v0/users/${TEST_USER}/training-continuity`, body: { sessions: { completed: 0, adapted: 0, missed: 0, home: 0 }, temporaryPlans: [] } },
+    { method: "POST", path: `/v0/users/${TEST_USER}/equipment`, body: { equipment: {} } },
+  ]);
+] as const);
+}
+
+/** Builds onboarding mock that can return either feasible or infeasible. */ function mockOnboardingApi(goal: GoalKind = "general_fitness", feasible = true) {  mockApi([    { method: "GET", path: "/v0/equipment", body: { equipment: [] } },    { method: "POST", path: "/v0/users", body: { user: { id: TEST_USER, displayName: "Ada", timezone: "UTC" } } },    { method: "PUT", path: `/v0/users/${TEST_USER}/profile`, body: { profile: {} } },    { method: "POST", path: `/v0/users/${TEST_USER}/measurements`, body: {} },    { method: "POST", path: `/v0/users/${TEST_USER}/goals`, body: { goal: { id: "g-1", kind: goal, status: "active", description: undefined, priorities: undefined, effectiveFrom: "2026-01-01" } } },    { method: "POST", path: `/v0/users/${TEST_USER}/training-plans/generate`, body: { feasibility: feasible ? "feasible" : "infeasible", ...(feasible ? { plan: { id: "p-1", kind: "standard", versions: [] } } : { infeasibilityReasons: ["This goal cannot be achieved with the selected number of training days and available equipment. Please reduce your training days or add equipment."] } } },\n    { method: "GET", path: `/v0/users/${TEST_USER}/training-plans/active`, body: feasible ? { plan: { id: "p-1", kind: "standard", status: "active", versions: [{ id: "v-1", planId: "p-1", versionNumber: 1, status: "active", startsOn: "2026-01-01", sessions: [] }] } } : { plan: null } },    { method: "GET", path: `/v0/users/${TEST_USER}/training-state`, body: { trainingState: { currentPlanVersionId: feasible ? "v-1" : undefined, currentPlanStatus: feasible ? "active" : undefined, trainingGoalKind: goal } } },    { method: "GET", path: `/v0/users/${TEST_USER}/training-continuity`, body: { sessions: { completed: 0, adapted: 0, missed: 0, home: 0 }, temporaryPlans: [] } },    { method: "POST", path: `/v0/users/${TEST_USER}/equipment`, body: { equipment: {} } },  ]);}
+}
+
+describe("OnboardingScreen acceptance", () => {
+  afterEach(() => {
+    cleanup();
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockReset();
+    localStorage.clear();
+  });
+
+  it(
+  "completes the interview, builds a plan, and signs the user in",
+  { timeout: 15000 },
+  async () => {
+    const user = userEvent.setup();
+    mockOnboardingApi("bodybuilding");
+    localStorage.removeItem("fitcoach.userId");
+
+    // The real product routes onboarding → Home; render both so the
+    // acceptance assertion is the actual post-onboarding surface.
+    render(
+      <MemoryRouter initialEntries={["/onboarding"]}>
+        <SessionProvider>
+          <Routes>
+            <Route path="/onboarding" element={<OnboardingScreen />} />
+            <Route path="/" element={<HomeScreen />} />
+          </Routes>
+        </SessionProvider>
+      </MemoryRouter>,
+    );
+
+    // Welcome: name → continue
+    await user.clear(screen.getByPlaceholderText("Your name"));
+    await user.type(screen.getByPlaceholderText("Your name"), "Ada");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await wait(100);
+
+    // Body: height
+    const bodySection = screen.getByText("Your body").closest("section")!;
+    const heightInput = within(bodySection).getAllByRole("spinbutton")[0]!;
+    await user.clear(heightInput);
+    await user.type(heightInput, "175");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await wait(100);
+
+    // Training: experience + days
+    await user.click(screen.getByRole("radio", { name: /Intermediate/ }));
+    const dayInputs = screen.getAllByRole("spinbutton");
+    await user.clear(dayInputs[0]!);
+    await user.type(dayInputs[0]!, "4");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await wait(100);
+
+    // Goal: bodybuilding
+    await user.click(screen.getByRole("radio", { name: /^Build muscle/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await wait(100);
+
+    // Environment: gym
+    await user.click(screen.getByRole("radio", { name: /^Gym/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await wait(100);
+
+    // Equipment: advance through all stages to building
+    for (let i = 0; i < 6; i++) {
+      if (screen.queryByRole("button", { name: /Build my plan/ })) break;
+      await user.click(screen.getByRole("button", { name: /Continue/ }));
+      await wait(100);
+    }
+
+    // Building: "Build my plan"
+    await user.click(screen.getByRole("button", { name: /Build my plan/ }));
+
+    // Signed in → navigated to signed-in Home
+    await waitFor(() => expect(screen.getByText(/Rest day/)).toBeInTheDocument(), { timeout: 8000 });
+    expect(localStorage.getItem("fitcoach.userId")).toBe(TEST_USER);
+    expect(screen.queryByRole("button", { name: /Build my plan/ })).not.toBeInTheDocument();
+  });
+});

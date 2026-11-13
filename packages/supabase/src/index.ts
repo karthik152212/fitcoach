@@ -15,7 +15,7 @@ export { getEnv, resetEnvCache, requireEnv, type ValidatedEnv, ConfigError } fro
 export { getServerSupabase, createServerSupabaseWithAuth, resetServerSupabase } from "./server/client";
 
 // Browser
-export { getBrowserSupabase, resetBrowserSupabase, getBrowserSession } from "./browser/client";
+export { getBrowserSupabase, resetBrowserSupabase, getBrowserSession, signOut } from "./browser/client";
 
 // Database
 export { getDatabaseUrl, getPooledDatabaseUrl, createPrismaClient } from "./shared/database";
