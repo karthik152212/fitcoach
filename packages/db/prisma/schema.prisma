@@ -1997,3 +1997,87 @@ model ConversationMessage {
   @@index([conversationId, createdAt(sort: Asc)])
   @@map("conversation_messages")
 }
+
+/// Idempotency key for request deduplication across API instances.
+/// Uses SHA-256 hash of client-provided key + request payload hash.
+model IdempotencyKey {
+  id          String            @id @default(uuid()) @map("id")
+  userId      String            @map("user_id") @db.Uuid
+  keyHash     String            @map("key_hash") @db.Text
+  requestHash String            @map("request_hash") @db.Text
+  status      IdempotencyStatus @default(PENDING) @map("status")
+  response    Json?             @map("response") @db.JsonB
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  expiresAt   DateTime          @map("expires_at") @db.Timestamptz(6)
+
+  @@unique([userId, keyHash], name: "idempotency_key_user_key")
+  @@index([expiresAt], name: "idempotency_key_expires_at_idx")
+  @@map("idempotency_keys")
+}
+
+enum IdempotencyStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+/// Rate limit bucket for token-bucket algorithm (persistent, multi-instance safe).
+model RateLimitBucket {
+  id          String   @id @default(uuid()) @map("id")
+  keyPrefix   String   @map("key_prefix") @db.Text
+  identifier  String   @map("identifier") @db.Text
+  tokens      Int      @default(0)
+  windowStart DateTime @default(now()) @map("window_start") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([keyPrefix, identifier], name: "rate_limit_bucket_key")
+  @@index([windowStart], name: "rate_limit_bucket_window_idx")
+  @@map("rate_limit_buckets")
+}
+
+/// Per-user daily token budget.
+model TokenBudget {
+  id          String   @id @default(uuid()) @map("id")
+  userId      String   @unique @map("user_id") @db.Uuid
+  dailyBudget Int      @default(100000) @map("daily_budget")
+  usedToday   Int      @default(0) @map("used_today")
+  dayStart    DateTime @default(now()) @map("day_start") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([dayStart], name: "token_budget_day_start_idx")
+  @@map("token_budgets")
+}
+
+/// Token reservation with 5-minute lease for atomic budget management.
+model TokenReservation {
+  id            String             @id @default(uuid()) @map("id")
+  userId        String             @map("user_id") @db.Uuid
+  tokens        Int
+  status        ReservationStatus  @default(ACTIVE) @map("status")
+  providerUsage Int?               @map("provider_usage")
+  expiresAt     DateTime           @map("expires_at") @db.Timestamptz(6)
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, status], name: "token_reservation_user_status_idx")
+  @@index([expiresAt], name: "token_reservation_expires_at_idx")
+  @@map("token_reservations")
+}
+
+enum ReservationStatus {
+  ACTIVE
+  COMMITTED
+  RELEASED
+  EXPIRED
+}
+
+/// Global daily token budget (single row, id='global').
+model GlobalTokenBudget {
+  id        String   @id @default("global") @map("id")
+  usedToday Int      @default(0) @map("used_today")
+  dayStart  DateTime @default(now()) @map("day_start") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("global_token_budget")
+}
