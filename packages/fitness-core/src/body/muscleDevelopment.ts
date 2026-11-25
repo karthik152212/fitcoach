@@ -215,16 +215,9 @@ function assessVolumeAppropriatenessForMuscle(
   mapping: MuscleMapping,
   volumeReport: WeeklyVolumeReport,
 ): "insufficient" | "appropriate" | "excessive" | "unknown" {
-  let totalEffectiveSets = 0;
-  let hasTarget = false;
-
-  for (const slug of mapping.volumeMuscleSlugs) {
-    const entry = volumeReport.byMuscle.find((e) => e.muscleSlug === slug);
-    if (entry) {
-      totalEffectiveSets += entry.totalEffectiveSets;
-      hasTarget = true;
-    }
-  }
+  const hasTarget = volumeReport.byMuscle.some((entry) =>
+    mapping.volumeMuscleSlugs.includes(entry.muscleSlug)
+  );
 
   if (!hasTarget) return "unknown";
 

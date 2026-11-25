@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        run: npm run db:generate
+
       - name: Run lint
         run: npm run lint
 
@@ -46,16 +49,41 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        run: npm run db:generate
+
       - name: Build
         run: npm run build
 
       - name: Run unit tests (excludes postgres-integration)
-        run: node --test "**/dist/**/*.test.js" --test-name-pattern="^((?!postgres-integration).)*$"
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          tests=()
+          for file in apps/*/dist/**/*.test.js packages/*/dist/**/*.test.js; do
+            [[ ${file##*/} == postgres-integration.test.js ]] || tests+=("$file")
+          done
+          test "${#tests[@]}" -gt 0
+          node --test --test-reporter=tap "${tests[@]}"
 
   integration-tests:
-    name: Integration Tests (Embedded PostgreSQL)
+    name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fitcoach_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d fitcoach_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -68,11 +96,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        run: npm run db:generate
+
       - name: Build
         run: npm run build
 
       - name: Run PostgreSQL integration tests
-        run: node --test apps/api/dist/services/__tests__/postgres-integration.test.js
+        env:
+          FITCOACH_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/fitcoach_test
+        run: |
+          node --test --test-reporter=tap apps/api/dist/services/__tests__/postgres-integration.test.js
+          node --test --test-reporter=tap packages/db/dist/__tests__/persistence.integration.js
 
   build-verification:
     name: Build Verification
@@ -90,14 +125,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        run: npm run db:generate
+
       - name: Build
         run: npm run build
-
-      - name: Verify all tests pass
-        run: |
-          echo "All CI checks passed!"
-          echo "Lint: ✓"
-          echo "TypeCheck: ✓"
-          echo "Unit Tests: ✓"
-          echo "Integration Tests: ✓"
-          echo "Build: ✓"

@@ -88,7 +88,7 @@ export function TrainScreen() {
     ? slots.findIndex((slot) => slot.exerciseId === activeExercise.exerciseId)
     : -1;
   const isActiveSession = Boolean(workout.active) && activeExerciseIndex >= 0;
-  const completedCount = slots.filter((slot) => workout.active?.setsByExercise[slot.exerciseId]?.length ?? 0 > 0).length;
+  const completedCount = slots.filter((slot) => (workout.active?.setsByExercise[slot.exerciseId]?.length ?? 0) > 0).length;
   const inProgressCount = activeExerciseIndex >= 0 ? 1 : 0;
   const pendingCount = slots.length - completedCount - inProgressCount;
 

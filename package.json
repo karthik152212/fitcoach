@@ -16,7 +16,7 @@
     "build": "tsc -b tsconfig.build.json",
     "test": "npm run build && node --env-file-if-exists=.env --test \"**/dist/**/*.test.js\"",
     "test:web": "npm run test -w @fitcoach/web",
-    "lint": "node -e \"console.log('lint: placeholder (no linter configured yet)'); process.exit(0)\"",
+    "lint": "oxlint --deny correctness --disable-unicorn-plugin apps packages scripts",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:validate": "prisma validate --schema packages/db/prisma/schema.prisma",
     "db:migrate:dev": "prisma migrate dev --schema packages/db/prisma/schema.prisma",
@@ -33,6 +33,7 @@
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@types/node": "^24.0.0",
+    "oxlint": "1.50.0",
     "typescript": "^5.9.0"
   }
 }

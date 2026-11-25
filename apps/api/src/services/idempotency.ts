@@ -37,7 +37,6 @@ interface IdempotencyEntry {
 }
 
 interface IdempotencyKeyRow {
-  id: string;
   status: string;
   response: unknown;
   request_hash: string;
@@ -160,62 +159,23 @@ class PostgresIdempotencyStore {
 
     try {
       return await withUserTransaction(this.prisma, userId, async (tx) => {
-        // Try to insert new key atomically with PENDING status
-        const result = await tx.$queryRaw<IdempotencyKeyRow[]>`
+        const inserted = await tx.$executeRaw`
           INSERT INTO "idempotency_keys" ("user_id", "key_hash", "request_hash", "status", "response", "expires_at", "created_at", "updated_at")
-          VALUES (${userId}::uuid, ${keyHash}, ${requestHash}, 'PENDING', NULL, ${expiresAt}, ${now}, ${now})
-          ON CONFLICT ("user_id", "key_hash") DO UPDATE SET
-            "status" = CASE
-              WHEN "idempotency_keys"."status" = 'PENDING' THEN 'PENDING'
-              ELSE "idempotency_keys"."status"
-            END,
-            "request_hash" = "idempotency_keys"."request_hash",
-            "updated_at" = ${now}
-          RETURNING "id", "status", "response", "request_hash";
+          VALUES (${userId}::uuid, ${keyHash}, ${requestHash}, 'COMPLETED', ${JSON.stringify(response)}::jsonb, ${expiresAt}, ${now}, ${now})
+          ON CONFLICT ("user_id", "key_hash") DO NOTHING
         `;
+        if (inserted === 1) return { isNew: true, key, userId };
 
-        const row = result[0];
-        if (!row) {
-          throw new Error("Idempotency upsert returned no row");
-        }
-
-        // If existing COMPLETED with matching request_hash, return cached response
-        if (row.status === 'COMPLETED' && row.response !== null && row.response !== undefined) {
-          if (row.request_hash !== requestHash) {
-            throw new Error("Idempotency key conflict: different payload for same key");
-          }
-          return {
-            isNew: false,
-            cachedResponse: row.response,
-            key,
-            userId,
-          };
-        }
-
-        // If existing PENDING (in-progress), fail-closed: reject duplicate
-        if (row.status === 'PENDING') {
-          throw new Error("Idempotency key already in progress");
-        }
-
-        // New PENDING request - now update with response and mark COMPLETED
-        const updateResult = await tx.$queryRaw<IdempotencyKeyRow[]>`
-          UPDATE "idempotency_keys"
-          SET "status" = 'COMPLETED', "response" = ${response}, "updated_at" = ${now}
+        const [row] = await tx.$queryRaw<IdempotencyKeyRow[]>`
+          SELECT "status", "response", "request_hash" FROM "idempotency_keys"
           WHERE "user_id" = ${userId}::uuid AND "key_hash" = ${keyHash}
-          AND "status" = 'PENDING'
-          RETURNING "id", "status", "response";
         `;
-
-        const updated = updateResult[0];
-        if (!updated) {
-          throw new Error("Failed to commit idempotency key");
+        if (!row) throw new Error("Idempotency key disappeared before it could be read");
+        if (row.status === 'PENDING') throw new Error("Idempotency key already in progress");
+        if (row.request_hash !== requestHash) {
+          throw new Error("Idempotency key conflict: different payload for same key");
         }
-
-        return {
-          isNew: true,
-          key,
-          userId,
-        };
+        return { isNew: false, cachedResponse: row.response, key, userId };
       });
     } catch (error) {
       // Fail-closed: on any error, deny to prevent duplicate processing

@@ -819,7 +819,8 @@ test("GET /v0/users/:userId/nutrition/daily returns daily totals", async () => {
     assert.equal(response.status, 200);
     const { daily } = (await response.json()) as { daily: DailyNutritionRecord };
     assert.ok(daily.totals.caloriesKcal > 0);
-    assert.ok(daily.targetsSnapshot?.caloriesKcal ?? 0 > 0);
+    const targetCalories = daily.targetsSnapshot?.caloriesKcal;
+    assert.ok(typeof targetCalories === "number" && targetCalories > 0);
   });
 });
 

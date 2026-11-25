@@ -417,7 +417,7 @@ class PostgresTokenBudgetStore {
 
         await tx.$executeRaw`
           INSERT INTO "token_reservations" ("id", "user_id", "tokens", "status", "expires_at", "created_at", "updated_at")
-          VALUES (${reservationId}, ${userId}::uuid, ${tokens}, 'ACTIVE', ${expiresAt}, ${now}, ${now})
+          VALUES (${reservationId}::uuid, ${userId}::uuid, ${tokens}, 'ACTIVE', ${expiresAt}, ${now}, ${now})
         `;
 
         // Atomically increment used_today
@@ -459,7 +459,7 @@ class PostgresTokenBudgetStore {
           SET "status" = 'COMMITTED',
               "provider_usage" = ${actualUsage ?? null},
               "updated_at" = ${now}
-          WHERE "id" = ${reservationId}
+          WHERE "id" = ${reservationId}::uuid
           AND "status" = 'ACTIVE'
           RETURNING "id", "user_id", "tokens", "status";
         `,
@@ -523,7 +523,7 @@ class PostgresTokenBudgetStore {
           UPDATE "token_reservations"
           SET "status" = 'RELEASED',
               "updated_at" = ${now}
-          WHERE "id" = ${reservationId}
+          WHERE "id" = ${reservationId}::uuid
           AND "status" = 'ACTIVE'
           RETURNING "user_id", "tokens";
         `,

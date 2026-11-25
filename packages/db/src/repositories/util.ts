@@ -23,7 +23,7 @@ export type TransactionClient = Omit<
 
 /**
  * Run a database operation within an interactive transaction with RLS context.
- * Sets `app.current_user_id` transaction-locally via SET LOCAL for PgBouncer
+ * Sets `app.current_user_id` transaction-locally via set_config for PgBouncer
  * transaction pooling compatibility.
  */
 export async function withUserTransaction<T>(
@@ -33,7 +33,7 @@ export async function withUserTransaction<T>(
 ): Promise<T> {
   return prisma.$transaction(async (tx) => {
     // Set transaction-local RLS context - parameterized to prevent injection
-    await tx.$executeRaw`SET LOCAL "app.current_user_id" = ${userId}::uuid`;
+    await tx.$queryRaw`SELECT set_config('app.current_user_id', ${userId}, true)`;
     return operation(tx as TransactionClient);
   });
 }

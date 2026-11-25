@@ -178,7 +178,7 @@ class PostgresRateLimiter {
       return await this.prisma.$transaction(async (tx) => {
         return this.refillAndCheck(tx, keyPrefix, identifier, maxRequests, windowMs, now);
       });
-    } catch (error) {
+    } catch {
       // Fail-closed: deny on any error
       return {
         allowed: false,
