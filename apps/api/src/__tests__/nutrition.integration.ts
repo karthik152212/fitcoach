@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { Profile, User, NutrientAmounts } from "@fitcoach/domain";
 import type {
   CreateMealInput,
+  CreateRecipeInput,
   CreateFoodInput,
   FoodRecord,
   MealRecord,
@@ -74,6 +75,7 @@ function createNutritionRepositories(store: InMemoryNutritionStore): Repositorie
     timezone: "UTC",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    profile,
   } as unknown as User;
 
   const foodSource = {
@@ -218,6 +220,12 @@ function createNutritionRepositories(store: InMemoryNutritionStore): Repositorie
     },
     meals: {
       async create(input: CreateMealInput) {
+        if (input.clientRequestId) {
+          const existing = [...store.meals.values()].find((meal) =>
+            meal.userId === input.userId && meal.clientRequestId === input.clientRequestId
+          );
+          if (existing) return existing;
+        }
         mealCounter++;
         const id = `meal_${mealCounter}`;
         const now = new Date().toISOString();
@@ -409,7 +417,7 @@ function createNutritionRepositories(store: InMemoryNutritionStore): Repositorie
       },
     },
     recipes: {
-      async createRecipe(input: { userId: string; name: string; servings: number; instructions?: string; items: any[] }) {
+      async create(input: CreateRecipeInput) {
         recipeCounter++;
         const id = uuid(5000 + recipeCounter);
         const now = new Date().toISOString();
@@ -423,7 +431,7 @@ function createNutritionRepositories(store: InMemoryNutritionStore): Repositorie
         }));
         const recipe: RecipeRecord = {
           id,
-          ownerUserId: input.userId,
+          ownerUserId: input.ownerUserId,
           name: input.name,
           servings: input.servings,
           instructions: input.instructions ?? undefined,
@@ -434,10 +442,10 @@ function createNutritionRepositories(store: InMemoryNutritionStore): Repositorie
         store.recipes.set(id, recipe);
         return recipe;
       },
-      async listRecipes(_userId: string) {
-        return [];
+      async listByOwner(userId: string) {
+        return [...store.recipes.values()].filter((recipe) => recipe.ownerUserId === userId);
       },
-      async getRecipe(id: string) {
+      async findById(id: string) {
         return store.recipes.get(id) ?? null;
       },
       async deactivate(_id: string) {
@@ -524,12 +532,13 @@ async function createMeal(
   baseUrl: string,
   items: Array<{ foodId: string; quantityGrams: number; confidence?: string }>,
   slot: string = "lunch",
+  localDate = "2026-10-06",
 ): Promise<MealRecord> {
   const response = await fetch(`${baseUrl}/v0/users/${USER_ID}/meals`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      localDate: "2026-10-06",
+      localDate,
       slot,
       items: items.map((item) => ({
         foodId: item.foodId,
@@ -940,16 +949,19 @@ test("GET /v0/users/:userId/nutrition/assessment returns adherence analysis", as
       fatGrams: 0.3,
     });
 
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const yesterday = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
     await createMeal(baseUrl, [
       { foodId: chicken.id, quantityGrams: 150 },
       { foodId: rice.id, quantityGrams: 200 },
-    ], "lunch");
+    ], "lunch", today);
 
     await fetch(`${baseUrl}/v0/users/${USER_ID}/meals`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        localDate: "2026-10-05",
+        localDate: yesterday,
         slot: "dinner",
         items: [
           { foodId: chicken.id, quantityGrams: 200, confidence: "measured" },

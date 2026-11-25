@@ -1506,6 +1506,22 @@ export function registerRoutes(router: Router, services: AppServices): void {
     return { status: 201, body: { food } };
   });
 
+  // -------------------------------------------------------------------------
+  // Food Search
+  // -------------------------------------------------------------------------
+  router.add("GET", "/v0/foods/search", async ({ query }) => {
+    const q = query.get("q");
+    if (!q || q.length < 2) {
+      throw new RouteError(400, "validation_failed", "query parameter q must be at least 2 characters");
+    }
+    const limit = Math.min(queryNumber(query, "limit", 1, Number.MAX_SAFE_INTEGER) ?? 20, 100);
+    const offset = queryNumber(query, "offset", 0, 10000) ?? 0;
+    const sourceId = query.get("sourceId") ?? undefined;
+
+    const result = await services.nutrition.searchFoods(q, { limit, offset, sourceId });
+    return { body: result };
+  });
+
   router.add("GET", "/v0/foods/:foodId", async ({ params }) => ({
     body: { food: await services.nutrition.getFood(params["foodId"]!) },
   }));
@@ -1651,11 +1667,11 @@ export function registerRoutes(router: Router, services: AppServices): void {
   // -------------------------------------------------------------------------
   router.add("POST", "/v0/users/:userId/nutrition/targets", async ({ params, body }) => {
     const userId = params["userId"]!;
-    const goal = requiredEnum(body, "goal", GOAL_KINDS) as unknown as import("@fitcoach/domain").Goal;
+    const kind = requiredEnum(body, "goal", GOAL_KINDS);
     const currentBodyWeightKg = optionalNumber(body, "currentBodyWeightKg", { min: 1, max: 500 });
     const bodyFatPercent = optionalNumber(body, "bodyFatPercent", { min: 0, max: 60 });
 
-    const targets = await services.nutritionTargets.deriveAndStoreTargets(userId, goal, {
+    const targets = await services.nutritionTargets.deriveAndStoreTargets(userId, { kind }, {
       currentBodyWeightKg,
       bodyFatPercent,
     });
@@ -1681,22 +1697,6 @@ export function registerRoutes(router: Router, services: AppServices): void {
 
     const assessment = await services.nutritionAssessment.assessAdherence(userId, targets, windowDays);
     return { body: { assessment } };
-  });
-
-  // -------------------------------------------------------------------------
-  // Food Search
-  // -------------------------------------------------------------------------
-  router.add("GET", "/v0/foods/search", async ({ query }) => {
-    const q = query.get("q");
-    if (!q || q.length < 2) {
-      throw new RouteError(400, "validation_failed", "query parameter q must be at least 2 characters");
-    }
-    const limit = queryNumber(query, "limit", 1, 100) ?? 20;
-    const offset = queryNumber(query, "offset", 0, 10000) ?? 0;
-    const sourceId = query.get("sourceId") ?? undefined;
-
-    const result = await services.nutrition.searchFoods(q, { limit, offset, sourceId });
-    return { body: result };
   });
 
   // -------------------------------------------------------------------------

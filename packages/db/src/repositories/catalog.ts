@@ -131,6 +131,19 @@ interface RequiredEquipmentRow {
   createdAt: Date;
 }
 
+interface RoleRow {
+  exerciseId: string;
+  role: string;
+  position: number;
+}
+
+interface MovementFunctionRow {
+  exerciseId: string;
+  functionId: string;
+  isPrimary: boolean;
+  function: { id: string; slug: string; name: string; region: string };
+}
+
 interface MuscleRelationRow {
   id: string;
   exerciseId: string;
@@ -152,8 +165,7 @@ interface StructureRelationRow {
   externalSourceId: string | null;
   createdAt: Date;
   updatedAt: Date;
-  muscle: MuscleRow | null;
-  structure: { id: string; slug: string; name: string; displayName: string | null; kind: string } | null;
+  structure: { id: string; slug: string; name: string; displayName: string | null; kind: string; muscle: MuscleRow };
 }
 
 interface ExerciseChildren {
@@ -249,7 +261,9 @@ const EXERCISE_INCLUDE = {
 const KNOWLEDGE_INCLUDE = {
   requiredEquipment: true,
   muscleRelations: { include: { muscle: true } },
-  structureRelations: { include: { muscle: true, structure: true } },
+  structureRelations: { include: { structure: { include: { muscle: true } } } },
+  movementFunctions: { include: { function: true } },
+  roles: true,
 } as const;
 
 /** Deterministic ordering for the resolved target list. */
@@ -275,6 +289,8 @@ type KnowledgeRow = ExerciseRow & {
   requiredEquipment: RequiredEquipmentRow[];
   muscleRelations: MuscleRelationRow[];
   structureRelations: StructureRelationRow[];
+  movementFunctions: MovementFunctionRow[];
+  roles: RoleRow[];
 };
 
 /**
@@ -301,13 +317,13 @@ export function resolveExerciseTargets(row: KnowledgeRow): ExerciseTargetRecord[
   }
 
   for (const relation of row.structureRelations) {
-    if (!relation.muscle || !relation.structure) continue;
+    const { muscle } = relation.structure;
     const emphasisValue = decimalToNumber(relation.emphasis);
     targets.push({
-      muscleId: relation.muscle.id,
-      muscleSlug: relation.muscle.slug,
-      muscleDisplayName: relation.muscle.displayName ?? relation.muscle.name,
-      muscleGroup: relation.muscle.group as MuscleGroup,
+      muscleId: muscle.id,
+      muscleSlug: muscle.slug,
+      muscleDisplayName: muscle.displayName ?? muscle.name,
+      muscleGroup: muscle.group as MuscleGroup,
       role: relation.role as MuscleRole,
       structureId: relation.structureId,
       structureSlug: relation.structure.slug,
@@ -324,6 +340,10 @@ export function resolveExerciseTargets(row: KnowledgeRow): ExerciseTargetRecord[
 
 export function exerciseKnowledgeRowToRecord(row: KnowledgeRow): ExerciseKnowledgeRecord {
   const base = exerciseRowToRecord(row);
+  const functions = [...row.movementFunctions]
+    .sort((a, b) => a.function.slug.localeCompare(b.function.slug))
+    .map((item) => item.function.slug as MovementFunction);
+  const primary = row.movementFunctions.find((item) => item.isPrimary);
   return {
     ...base,
     stabilityDemand: (row.stabilityDemand ?? undefined) as StabilityDemand | undefined,
@@ -334,9 +354,11 @@ export function exerciseKnowledgeRowToRecord(row: KnowledgeRow): ExerciseKnowled
       | RangeOfMotionCharacteristic
       | undefined,
     targets: resolveExerciseTargets(row),
-    movementFunctions: [],
-    primaryMovementFunction: undefined,
-    roles: [],
+    movementFunctions: functions,
+    primaryMovementFunction: (primary?.function.slug ?? undefined) as MovementFunction | undefined,
+    roles: [...row.roles]
+      .sort((a, b) => a.position - b.position)
+      .map((item) => item.role as ExerciseRole),
   };
 }
 
@@ -517,8 +539,20 @@ export class PrismaExerciseRepository implements ExerciseRepository {
   async upsertMovementFunction(
     input: UpsertMovementFunctionInput,
   ): Promise<{ id: string; slug: string }> {
-    // movementFunction model removed from schema; return mock result
-    return { id: newUuidv7(), slug: input.slug };
+    return runDb(async () => {
+      const row = await this.prisma.movementFunction.upsert({
+        where: { slug: input.slug },
+        create: {
+          id: newUuidv7(),
+          slug: input.slug,
+          name: input.name,
+          region: input.region,
+          description: input.description ?? null,
+        },
+        update: { name: input.name, region: input.region, description: input.description ?? null },
+      });
+      return { id: row.id, slug: row.slug };
+    });
   }
 
   async upsertExercise(input: UpsertExerciseInput): Promise<ExerciseRecord> {
@@ -652,6 +686,31 @@ export class PrismaExerciseRepository implements ExerciseRepository {
             });
           }
           if (data.length > 0) await tx.exerciseMuscleStructureRelation.createMany({ data });
+        }
+
+        if (input.movementFunctions) {
+          await tx.exerciseMovementFunction.deleteMany({ where: { exerciseId: row.id } });
+          const data: { exerciseId: string; functionId: string; isPrimary: boolean }[] = [];
+          for (const slug of new Set(input.movementFunctions)) {
+            const fn = await tx.movementFunction.findUnique({ where: { slug }, select: { id: true } });
+            if (!fn) throw new NotFoundError(`movement function ${slug} not found`);
+            data.push({
+              exerciseId: row.id,
+              functionId: fn.id,
+              isPrimary: slug === input.primaryMovementFunction,
+            });
+          }
+          if (data.length > 0) await tx.exerciseMovementFunction.createMany({ data });
+        }
+
+        if (input.roles) {
+          await tx.exerciseRoleAssignment.deleteMany({ where: { exerciseId: row.id } });
+          const data = [...new Set(input.roles)].map((role, position) => ({
+            exerciseId: row.id,
+            role,
+            position,
+          }));
+          if (data.length > 0) await tx.exerciseRoleAssignment.createMany({ data });
         }
 
         const full = await tx.exercise.findUnique({
@@ -810,6 +869,12 @@ export class PrismaExerciseRepository implements ExerciseRepository {
           };
         }
       }
+      if (query?.movementFunction) {
+        where["movementFunctions"] = {
+          some: { function: { slug: query.movementFunction } },
+        };
+      }
+      if (query?.role) where["roles"] = { some: { role: query.role } };
       if (query?.equipmentIds && query.equipmentIds.length > 0) {
         // All listed equipment is required simultaneously, so requiring every
         // requested piece is an AND of separate conditions.
@@ -838,7 +903,17 @@ export class PrismaExerciseRepository implements ExerciseRepository {
   }
 
   async listMovementFunctions(): Promise<UpsertMovementFunctionInput[]> {
-    // movementFunction model removed from schema; return empty array
-    return [];
+    return runDb(async () => {
+      const rows = await this.prisma.movementFunction.findMany({
+        where: { isActive: true },
+        orderBy: { slug: "asc" },
+      });
+      return rows.map((row) => ({
+        slug: row.slug,
+        name: row.name,
+        region: row.region,
+        description: row.description ?? undefined,
+      }));
+    });
   }
 }

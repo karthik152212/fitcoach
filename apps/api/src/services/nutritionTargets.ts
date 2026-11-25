@@ -14,6 +14,12 @@ import {
   DEFAULT_NUTRITION_TARGET_CONFIGURATION,
 } from "@fitcoach/nutrition";
 
+type TargetDetails = NutritionTargets & {
+  userId: string;
+  goal?: Goal["kind"];
+  derivedFrom?: { profile: boolean; goal: boolean; bodyComposition: boolean };
+};
+
 export interface NutritionTargetService {
   /**
    * Derive and store personalized nutrition targets for a user.
@@ -21,9 +27,9 @@ export interface NutritionTargetService {
    */
   deriveAndStoreTargets(
     userId: string,
-    goal: Goal,
+    goal: TargetDerivationInput["goal"],
     overrides?: Partial<TargetDerivationInput>,
-  ): Promise<NutritionTargets>;
+  ): Promise<TargetDetails>;
 
   /**
    * Get stored targets for a user (from latest daily_nutrition target snapshot or recompute).
@@ -50,9 +56,9 @@ export class PrismaNutritionTargetService implements NutritionTargetService {
 
   async deriveAndStoreTargets(
     userId: string,
-    goal: Goal,
+    goal: TargetDerivationInput["goal"],
     overrides?: Partial<TargetDerivationInput>,
-  ): Promise<NutritionTargets> {
+  ): Promise<TargetDetails> {
     const user = await this.requireUser(userId);
 
     // Build the derivation input
@@ -63,7 +69,16 @@ export class PrismaNutritionTargetService implements NutritionTargetService {
     };
 
     // Derive targets using the nutrition engine
-    const targets = deriveNutritionTargets(input, this.config);
+    const targets: TargetDetails = {
+      ...deriveNutritionTargets(input, this.config),
+      userId,
+      goal: goal.kind,
+      derivedFrom: {
+        profile: true,
+        goal: true,
+        bodyComposition: input.currentBodyWeightKg !== undefined || input.bodyFatPercent !== undefined,
+      },
+    };
 
     // Store as snapshot on today's daily nutrition record
     const today = new Date().toISOString().split("T")[0] as CalendarDate;
@@ -72,7 +87,7 @@ export class PrismaNutritionTargetService implements NutritionTargetService {
     return targets;
   }
 
-  async getTargets(userId: string): Promise<NutritionTargets | null> {
+  async getTargets(userId: string): Promise<TargetDetails | null> {
     // First check today's daily nutrition for a targets snapshot
     const today = new Date().toISOString().split("T")[0] as CalendarDate;
     const daily = await this.repos.nutrition.getDaily(userId, today);
@@ -80,6 +95,9 @@ export class PrismaNutritionTargetService implements NutritionTargetService {
     if (daily?.targetsSnapshot) {
       const snapshot = daily.targetsSnapshot as Record<string, unknown>;
       return {
+        userId,
+        goal: snapshot.goal as TargetDetails["goal"],
+        derivedFrom: snapshot.derivedFrom as TargetDetails["derivedFrom"],
         caloriesKcal: snapshot.caloriesKcal as number,
         proteinGrams: snapshot.proteinGrams as number,
         carbohydrateGrams: snapshot.carbohydrateGrams as number | undefined,
@@ -104,15 +122,7 @@ export class PrismaNutritionTargetService implements NutritionTargetService {
       userId,
       localDate,
       totals,
-      targetsSnapshot: {
-        caloriesKcal: targets.caloriesKcal,
-        proteinGrams: targets.proteinGrams,
-        carbohydrateGrams: targets.carbohydrateGrams,
-        fatGrams: targets.fatGrams,
-        fiberGrams: targets.fiberGrams,
-        basisNote: targets.basisNote,
-        effectiveFrom: targets.effectiveFrom,
-      },
+      targetsSnapshot: { ...targets },
     });
   }
 }

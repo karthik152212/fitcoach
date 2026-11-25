@@ -5,7 +5,7 @@ import type { Goal, NutritionTargets, User, Sex, CalendarDate } from "@fitcoach/
  */
 export interface TargetDerivationInput {
   user: User;
-  goal: Goal;
+  goal: Pick<Goal, "kind" | "physiqueTarget">;
   /** Rolling activity context; activity targets are contextual, never universal. */
   averageStepsLast14Days?: number;
   weeklyCardioMinutes?: number;

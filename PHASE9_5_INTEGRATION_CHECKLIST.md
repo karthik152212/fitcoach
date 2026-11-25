@@ -10,10 +10,10 @@
 
 | Stage | Description | Status | Key Files |
 |-------|-------------|--------|-----------|
-| **0** | Migration Finalization | ✅ Complete | `packages/db/prisma/migrations/0001_init/migration.sql` (7 unique constraints), `packages/db/src/testing/postgres.ts` (timeout 300s) |
+| **0** | Migration Finalization | ✅ Complete | `packages/db/prisma/migrations/0001_baseline/migration.sql`, `packages/db/src/testing/postgres.ts` (timeout 300s) |
 | **1** | Supabase Foundation (new package) | ✅ Complete | `packages/supabase/` — env validation, server/browser clients, Prisma integration |
 | **2** | Authentication Architecture | ✅ Complete | `apps/api/src/services/auth.ts`, `authMiddleware.ts`, routes `/v0/auth/*` |
-| **3** | Database Security (RLS) | ✅ Complete | `packages/db/prisma/migrations/20261112000000_add_rls_policies/migration.sql` (24 tables) |
+| **3** | Database Security (RLS) | ✅ Complete | `packages/db/prisma/migrations/0001_baseline/migration.sql` (RLS policies) |
 | **4** | AI Provider Abstraction | ✅ Complete | `packages/ai/src/anthropicProvider.ts`, `openaiProvider.ts`, `aiProviderFactory.ts` |
 | **5** | Rate Limiting, Idempotency, Token Budgets | ✅ Complete | `apps/api/src/services/rateLimit.ts`, `idempotency.ts`, `tokenBudget.ts` |
 | **6** | Frontend Auth Integration | ✅ Complete | `apps/web/src/session/AuthContext.tsx`, `AuthScreen.tsx`, updated router |
@@ -184,7 +184,7 @@ All tests must pass in CI before deployment.
 - Updated `apps/web/src/api/client.ts` — Auto-attaches Bearer token
 
 ### Migrations
-- `packages/db/prisma/migrations/20261112000000_add_rls_policies/migration.sql` — RLS on 24 tables
+- `packages/db/prisma/migrations/0001_baseline/migration.sql` — Prisma schema and PostgreSQL constraints, triggers, RLS and grants
 
 ### Tests (4 new files, 37 tests)
 - `apps/api/src/services/__tests__/rateLimit.test.ts` (6 tests)

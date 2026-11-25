@@ -15,6 +15,7 @@ import type {
 } from "@fitcoach/db";
 import { createServer } from "../server";
 import { createServices } from "../services";
+import { BarcodeScannerService } from "../services/barcode";
 
 /**
  * Phase 7 Barcode Scanner API integration tests.
@@ -73,6 +74,7 @@ function createBarcodeRepositories(store: InMemoryBarcodeStore): Repositories {
     timezone: "UTC",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    profile,
   } as unknown as User;
 
   const foodSource = {
@@ -472,7 +474,11 @@ async function withServer(
   store: InMemoryBarcodeStore,
   run: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
-  const services = createServices(createBarcodeRepositories(store));
+  const repos = createBarcodeRepositories(store);
+  const services = createServices(repos);
+  services.barcode = new BarcodeScannerService(repos, services.nutritionTargets, async () =>
+    Response.json({ status: 0 })
+  );
   const server = createServer({ services });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   try {

@@ -11,12 +11,29 @@ Inputs: `docs/DATABASE_DESIGN.md`, `docs/PRODUCT_SPEC.md`, `packages/domain/`.
 
 ---
 
+## Migration baseline
+
+The current history starts at `0001_baseline`. The original migrations remain
+in Git at commit `6e17177`. They were used only on disposable databases.
+The baseline combines Prisma-managed tables with PostgreSQL checks, indexes,
+deferred history constraints, triggers, nutrient reference data, RLS and
+service-role permissions. Apply it to a fresh database with
+`npm run db:migrate:deploy`, then check `npm run db:migrate:status`.
+
+For a fresh staging database, run `scripts/staging-migrate.sh` with
+`STAGING_DB_URL` set to the direct staging connection and dependencies installed.
+The migration role needs permission to create the `fitcoach_app` role if it is
+absent. The staging command records the migration through Prisma and verifies the
+service grants, RLS, deferred constraints and special indexes. A Prisma drift
+comparison will list `body_measurement_values_site_idx` because the schema
+cannot express the index's `INCLUDE (value_cm)` clause.
+
 ## 1. What runs today
 
 | Piece | Choice |
 |---|---|
 | Database | PostgreSQL 17 (embedded binary for tests, any PG ≥ 14 for dev/prod) |
-| Schema tooling | Prisma 6.19 — schema + migrations; hand-written SQL appended to `0001_init` |
+| Schema tooling | Prisma 6.19 — schema + migrations; hand-written SQL appended to `0001_baseline` |
 | Query client | `@prisma/client` behind repository interfaces |
 | IDs | Application-generated UUIDv7 (RFC 9562) — `packages/db/src/ids.ts` |
 | Tests | `node:test` over real PostgreSQL (embedded or `FITCOACH_TEST_DATABASE_URL`) |
@@ -30,7 +47,7 @@ packages/db/
 │   ├── schema.prisma            # 53 domain models (clusters A–E)
 │   └── migrations/
 │       ├── migration_lock.toml  # provider = postgresql
-│       ├── 0001_init/
+│       ├── 0001_baseline/
 │       │   └── migration.sql    # generated core + ~400 lines hand-written SQL
 │       ├── 0002_phase2_exercise_knowledge/
 │       │   └── migration.sql    # Phase 2 knowledge constraints/indexes
@@ -135,7 +152,7 @@ boots PostgreSQL.
   `TrainingEnvironmentPeriod`, `ProgressionEvaluation` and
   `ProgressionDecisionEvent`. Text columns + CHECK constraints mirror the
   domain union types (Prisma enums were rejected in the design).
-* **`migrations/0001_init/migration.sql`** (1370 lines) = two layers:
+* **`migrations/0001_baseline/migration.sql`** contains two layers:
   1. the `prisma migrate diff --from-empty` core (tables, FKs, basic indexes);
   2. a hand-written block implementing everything Prisma cannot express:
      * **98 CHECK constraints** (enums, ranges, mutual-exclusion rules);
@@ -368,7 +385,7 @@ Other decisions worth explicit approval:
 3. **No query logging** in `PrismaClient` (Prisma query events contain bind
    parameters — meals, body metrics and notes are health data).
 4. **`PUT /profile` replaces** (see §8) rather than merges.
-5. **Hand-written SQL lives inside `0001_init`** instead of follow-up
+5. **Hand-written SQL lives inside `0001_baseline`** instead of follow-up
    migrations, because Phase 1 ships one atomic baseline. Later phases add
    their own migration (`0002_phase2_exercise_knowledge`,
    `0003_phase3_adaptive_training`,

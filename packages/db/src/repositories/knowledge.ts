@@ -266,37 +266,45 @@ export class PrismaKnowledgeRepository implements KnowledgeRepository {
       );
     }
     return runDb(async () => {
-      const where = input.id !== undefined
-        ? { id: input.id }
-        : {
-            exerciseId_type_angle_formVersionId: {
-              exerciseId: input.exerciseId,
-              type: input.type,
-              angle: input.angle ?? "",
-              formVersionId: input.formVersionId ?? "",
-            },
-          };
-      const row = await this.prisma.exerciseMediaAsset.upsert({
-        where: where as any,
-        create: {
-          id: input.id ?? newUuidv7(),
-          exerciseId: input.exerciseId,
-          formVersionId: input.formVersionId ?? null,
-          type: input.type,
-          angle: input.angle ?? null,
-          url: input.url,
-          caption: input.caption ?? null,
-          isActive: input.isActive ?? true,
-          externalSourceId: input.externalSourceId ?? null,
-        },
-        update: {
-          url: input.url,
-          caption: input.caption ?? null,
-          isActive: input.isActive ?? true,
-          externalSourceId: input.externalSourceId ?? null,
-        },
+      const data = {
+        url: input.url,
+        caption: input.caption ?? null,
+        isActive: input.isActive ?? true,
+        externalSourceId: input.externalSourceId ?? null,
+      };
+      if (input.id !== undefined) {
+        const row = await this.prisma.exerciseMediaAsset.upsert({
+          where: { id: input.id },
+          create: {
+            ...data,
+            id: input.id,
+            exerciseId: input.exerciseId,
+            formVersionId: input.formVersionId ?? null,
+            type: input.type,
+            angle: input.angle ?? null,
+          },
+          update: data,
+        });
+        return mediaRowToRecord(row);
+      }
+
+      return this.prisma.$transaction(async (tx) => {
+        const [asset] = await tx.$queryRaw<{ id: string }[]>`
+          INSERT INTO exercise_media_assets
+            (id, exercise_id, form_version_id, type, angle, url, caption, is_active, external_source_id)
+          VALUES
+            (${newUuidv7()}::uuid, ${input.exerciseId}::uuid, ${input.formVersionId ?? null}::uuid,
+             ${input.type}, ${input.angle ?? null}, ${data.url}, ${data.caption},
+             ${data.isActive}, ${data.externalSourceId}::uuid)
+          ON CONFLICT (exercise_id, type, angle, form_version_id) DO UPDATE
+            SET url = EXCLUDED.url, caption = EXCLUDED.caption, is_active = EXCLUDED.is_active,
+                external_source_id = EXCLUDED.external_source_id, updated_at = NOW()
+          RETURNING id
+        `;
+        if (!asset) throw new NotFoundError("media asset upsert returned no row");
+        const row = await tx.exerciseMediaAsset.findUniqueOrThrow({ where: { id: asset.id } });
+        return mediaRowToRecord(row);
       });
-      return mediaRowToRecord(row);
     });
   }
 

@@ -26,6 +26,7 @@ interface PlanRow {
   name: string;
   status: string;
   description: string | null;
+  kind: string;
   activeFrom: Date | null;
   activeUntil: Date | null;
   createdAt: Date;
@@ -35,6 +36,7 @@ interface PlanRow {
 interface PlanVersionRow {
   id: string;
   planId: string;
+  versionNumber: number;
   status: string;
   planJson: string;
   configVersion: string | null;
@@ -162,7 +164,7 @@ function versionRowToRecord(row: PlanVersionWithSessions): PlanVersionRecord {
     effectiveFrom: toCalendarDate(row.effectiveFrom),
     effectiveUntil: row.effectiveUntil ? toCalendarDate(row.effectiveUntil) : undefined,
     startsOn: row.effectiveFrom ? toCalendarDate(row.effectiveFrom) : undefined,
-    versionNumber: undefined,
+    versionNumber: row.versionNumber,
     rationaleNotes: undefined,
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
@@ -178,9 +180,8 @@ interface PlanWithVersions extends PlanRow {
 }
 
 function planRowToRecord(row: PlanWithVersions): PlanAggregate {
-  const latestVersion = row.versions
-    .slice()
-    .sort((a, b) => (a.effectiveFrom > b.effectiveFrom ? 1 : -1))[0];
+  const versions = row.versions.slice().sort((a, b) => a.versionNumber - b.versionNumber);
+  const latestVersion = versions.at(-1);
   let planJson: { kind?: string; environmentKind?: string; temporaryForVersionId?: string; effectiveUntil?: string } = {};
   if (latestVersion) {
     try {
@@ -197,16 +198,13 @@ function planRowToRecord(row: PlanWithVersions): PlanAggregate {
     description: row.description ?? undefined,
     activeFrom: row.activeFrom ? toCalendarDate(row.activeFrom) : undefined,
     activeUntil: row.activeUntil ? toCalendarDate(row.activeUntil) : undefined,
-    kind: planJson.kind as "primary" | "temporary_environment" | undefined,
+    kind: row.kind === "temporary_environment" ? "temporary_environment" : "primary",
     environmentKind: planJson.environmentKind,
     temporaryForVersionId: planJson.temporaryForVersionId,
     effectiveUntil: planJson.effectiveUntil,
     createdAt: toTimestamp(row.createdAt),
     updatedAt: toTimestamp(row.updatedAt),
-    versions: row.versions
-      .slice()
-      .sort((a, b) => (a.effectiveFrom > b.effectiveFrom ? 1 : -1))
-      .map(versionRowToRecord),
+    versions: versions.map(versionRowToRecord),
   };
 }
 
@@ -646,6 +644,7 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
             name: input.name,
             status: input.status ?? "draft",
             description: input.description ?? null,
+            kind: input.kind ?? "primary",
             activeFrom: input.activeFrom ? new Date(`${input.activeFrom}T00:00:00.000Z`) : null,
             activeUntil: input.activeUntil ? new Date(`${input.activeUntil}T00:00:00.000Z`) : null,
           },
@@ -724,7 +723,8 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
     const versionId = newUuidv7();
     return runDb(async () => {
       return this.prisma.$transaction(async (tx) => {
-        const plan = await tx.trainingPlan.findUnique({ where: { id: planId } });
+        // Serialize version allocation and supersession for this plan.
+        const [plan] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM training_plans WHERE id = ${planId}::uuid FOR UPDATE`;
         if (!plan) throw new NotFoundError(`training plan ${planId} not found`);
 
         const exerciseIds = version.sessions.flatMap((session) =>
@@ -743,6 +743,10 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
           ? new Date(`${version.effectiveUntil}T00:00:00.000Z`)
           : null;
 
+        const latest = await tx.trainingPlanVersion.aggregate({
+          where: { planId },
+          _max: { versionNumber: true },
+        });
         const previousActive = await tx.trainingPlanVersion.findFirst({
           where: { planId, status: "active" },
           orderBy: { effectiveFrom: "desc" },
@@ -751,7 +755,7 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
         if (previousActive) {
           await tx.trainingPlanVersion.update({
             where: { id: previousActive.id },
-            data: { status: "superseded" },
+            data: { status: "superseded", effectiveUntil: effectiveFrom },
           });
         }
 
@@ -759,6 +763,7 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
           data: {
             id: versionId,
             planId,
+            versionNumber: (latest._max.versionNumber ?? 0) + 1,
             status: version.status ?? "active",
             planJson: version.planJson,
             configVersion: version.configVersion ?? null,
@@ -841,16 +846,11 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
 
   async findActive(userId: string): Promise<PlanAggregate | null> {
     return runDb(async () => {
-      // Fetch all active plans for the user and return the primary one.
-      // Temporary plans have temporaryForVersionId set in planJson.
-      const rows = await this.prisma.trainingPlan.findMany({
-        where: { userId, status: "active" },
+      const row = await this.prisma.trainingPlan.findFirst({
+        where: { userId, status: "active", kind: "primary" },
         include: PLAN_INCLUDE,
       });
-      const all = rows.map(planRowToRecord);
-      // Prefer primary plan (kind !== "temporary_environment") over temporary.
-      const primary = all.find((p) => p.kind !== "temporary_environment");
-      return primary ?? all[0] ?? null;
+      return row ? planRowToRecord(row) : null;
     });
   }
 
@@ -868,12 +868,11 @@ export class PrismaTrainingPlanRepository implements TrainingPlanRepository {
   async listTemporary(userId: string): Promise<PlanAggregate[]> {
     return runDb(async () => {
       const rows = await this.prisma.trainingPlan.findMany({
-        where: { userId },
+        where: { userId, kind: "temporary_environment" },
         include: PLAN_INCLUDE,
         orderBy: { createdAt: "desc" },
       });
-      const allPlans = rows.map(planRowToRecord);
-      return allPlans.filter((plan) => plan.kind === "temporary_environment");
+      return rows.map(planRowToRecord);
     });
   }
 

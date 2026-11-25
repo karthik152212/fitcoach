@@ -413,11 +413,61 @@ model Exercise {
   userPreferences      UserExercisePreference[]
 
   // UNIQUE (external_source_id, external_id) partial == PG UNIQUE (NULLs distinct).
+  movementFunctions ExerciseMovementFunction[]
+  roles ExerciseRoleAssignment[]
+
   @@unique([externalSourceId, externalId])
   @@index([externalSourceId])
   @@index([movementPattern])
   @@index([variationKey])
+  @@index([aliases], type: Gin, map: "exercises_aliases_gin")
   @@map("exercises")
+}
+
+model MovementFunction {
+  id          String  @id @db.Uuid
+  slug        String  @unique @db.Text
+  name        String  @db.Text
+  /// Body area the function acts on: 'shoulder','elbow','hip','knee','ankle',
+  /// 'spine','trunk','general'.
+  region      String  @db.Text
+  description String? @db.Text
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  exercises ExerciseMovementFunction[]
+
+  @@index([region])
+  @@map("movement_functions")
+}
+
+model ExerciseMovementFunction {
+  exerciseId String  @map("exercise_id") @db.Uuid
+  functionId String  @map("function_id") @db.Uuid
+  /// True for the function that best characterises the exercise.
+  isPrimary  Boolean @default(false) @map("is_primary")
+
+  exercise Exercise         @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  function MovementFunction @relation(fields: [functionId], references: [id], onDelete: Restrict)
+
+  @@id([exerciseId, functionId])
+  @@index([functionId])
+  @@map("exercise_movement_functions")
+}
+
+model ExerciseRoleAssignment {
+  exerciseId String @map("exercise_id") @db.Uuid
+  role       String @db.Text
+  /// UNIQUE (exercise_id, position) — the display order is author-controlled.
+  position   Int    @db.SmallInt
+
+  exercise Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+
+  @@id([exerciseId, role])
+  @@unique([exerciseId, position])
+  @@map("exercise_roles")
 }
 
 model ExerciseRequiredEquipment {
@@ -531,6 +581,7 @@ model ExerciseMediaAsset {
   @@index([exerciseId])
   @@index([formVersionId])
   @@index([externalSourceId])
+  @@unique([exerciseId, type, angle, formVersionId], map: "exercise_media_assets_identity_key")
   @@map("exercise_media_assets")
 }
 
@@ -562,6 +613,7 @@ model TrainingPlan {
   userId          String    @map("user_id") @db.Uuid
   name            String    @db.Text
   description     String?   @db.Text
+  kind            String    @default("primary") @db.Text
   /// CHECK in ('active','archived','draft').
   status          String    @db.Text
   /// User-local day when plan became active.
@@ -584,6 +636,7 @@ model TrainingPlan {
 
 model TrainingPlanVersion {
   id           String   @id @db.Uuid
+  versionNumber Int     @default(1) @map("version_number")
   planId       String   @map("plan_id") @db.Uuid
   /// CHECK in ('active','superseded','draft').
   status       String   @db.Text
@@ -614,6 +667,7 @@ model TrainingPlanVersion {
 
   // PARTIAL UNIQUE (plan_id) WHERE effective_until IS NULL — at most one
   // active version per plan; enforced in migration SQL.
+  @@unique([planId, versionNumber])
   @@index([planId, effectiveFrom(sort: Desc)])
   @@map("training_plan_versions")
 }
@@ -862,7 +916,7 @@ model Workout {
 
   user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   plan        TrainingPlan?        @relation(fields: [planId], references: [id], onDelete: SetNull)
-  planVersion TrainingPlanVersion? @relation("WorkoutPlanVersion", fields: [planVersionId], references: [id], onDelete: Restrict)
+  planVersion TrainingPlanVersion? @relation("WorkoutPlanVersion", fields: [planVersionId], references: [id], onDelete: NoAction)
   planSession TrainingPlanSession? @relation(fields: [planSessionId], references: [id], onDelete: SetNull)
   exercises   WorkoutExercise[]
 
@@ -954,7 +1008,7 @@ model ExerciseSet {
   // CHECK that at least one measurable exists:
   // (reps OR distance_meters OR duration_seconds) IS NOT NULL — in SQL.
   @@unique([workoutExerciseId, clientRequestId])
-  @@index([workoutExerciseId, position])
+  @@unique([workoutExerciseId, position], map: "exercise_sets_position_unique")
   @@map("exercise_sets")
 }
 
@@ -1312,7 +1366,7 @@ model RecipeItem {
   notes         String? @db.Text
 
   recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
-  food   Food   @relation(fields: [foodId], references: [id], onDelete: Restrict)
+  food   Food   @relation(fields: [foodId], references: [id], onDelete: NoAction)
 
   @@unique([recipeId, position])
   @@index([foodId])
@@ -1376,8 +1430,8 @@ model MealItem {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   meal   Meal    @relation(fields: [mealId], references: [id], onDelete: Cascade)
-  food   Food?   @relation(fields: [foodId], references: [id], onDelete: Restrict)
-  recipe Recipe? @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  food   Food?   @relation(fields: [foodId], references: [id], onDelete: NoAction)
+  recipe Recipe? @relation(fields: [recipeId], references: [id], onDelete: NoAction)
 
   // Polymorphic ref: two nullable FKs + mutually-exclusive CHECK (in SQL).
   @@index([mealId])
@@ -1445,8 +1499,8 @@ model Diagnosis {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   user              User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  activeGoal        Goal?                 @relation("DiagnosisActiveGoal", fields: [activeGoalId], references: [id], onDelete: Restrict)
-  activePlanVersion TrainingPlanVersion?  @relation("DiagnosisActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: Restrict)
+  activeGoal        Goal?                 @relation("DiagnosisActiveGoal", fields: [activeGoalId], references: [id], onDelete: NoAction)
+  activePlanVersion TrainingPlanVersion?  @relation("DiagnosisActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: NoAction)
   evidence          DiagnosisEvidence[]
   recommendations   Recommendation[]
   interventions     Intervention[]
@@ -1502,8 +1556,8 @@ model Recommendation {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  diagnosis    Diagnosis?               @relation(fields: [diagnosisId], references: [id], onDelete: Restrict)
-  intervention Intervention?            @relation(fields: [interventionId], references: [id], onDelete: Restrict)
+  diagnosis    Diagnosis?               @relation(fields: [diagnosisId], references: [id], onDelete: NoAction)
+  intervention Intervention?            @relation(fields: [interventionId], references: [id], onDelete: NoAction)
   evidence     RecommendationEvidence[]
 
   @@index([userId, presentedAt(sort: Desc)])
@@ -1558,11 +1612,11 @@ model Intervention {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   user              User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  diagnosis         Diagnosis?            @relation(fields: [diagnosisId], references: [id], onDelete: Restrict)
+  diagnosis         Diagnosis?            @relation(fields: [diagnosisId], references: [id], onDelete: NoAction)
   supersededBy      Intervention?         @relation("InterventionSupersession", fields: [supersededByInterventionId], references: [id], onDelete: SetNull)
   supersessions     Intervention[]        @relation("InterventionSupersession")
-  activeGoal        Goal?                 @relation("InterventionActiveGoal", fields: [activeGoalId], references: [id], onDelete: Restrict)
-  activePlanVersion TrainingPlanVersion?  @relation("InterventionActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: Restrict)
+  activeGoal        Goal?                 @relation("InterventionActiveGoal", fields: [activeGoalId], references: [id], onDelete: NoAction)
+  activePlanVersion TrainingPlanVersion?  @relation("InterventionActivePlanVersion", fields: [activePlanVersionId], references: [id], onDelete: NoAction)
   outcomes          InterventionOutcome[]
   recommendations   Recommendation[]
 
@@ -1590,7 +1644,7 @@ model InterventionOutcome {
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  intervention      Intervention @relation(fields: [interventionId], references: [id], onDelete: Restrict)
+  intervention      Intervention @relation(fields: [interventionId], references: [id], onDelete: NoAction)
   followUpDiagnosis Diagnosis?   @relation("OutcomeFollowUpDiagnosis", fields: [followUpDiagnosisId], references: [id], onDelete: SetNull)
 
   @@unique([interventionId, evaluationWindow])
@@ -2001,17 +2055,18 @@ model ConversationMessage {
 /// Idempotency key for request deduplication across API instances.
 /// Uses SHA-256 hash of client-provided key + request payload hash.
 model IdempotencyKey {
-  id          String            @id @default(uuid()) @map("id")
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId      String            @map("user_id") @db.Uuid
   keyHash     String            @map("key_hash") @db.Text
   requestHash String            @map("request_hash") @db.Text
   status      IdempotencyStatus @default(PENDING) @map("status")
   response    Json?             @map("response") @db.JsonB
   createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   expiresAt   DateTime          @map("expires_at") @db.Timestamptz(6)
 
   @@unique([userId, keyHash], name: "idempotency_key_user_key")
+  @@index([status], map: "idempotency_key_status_idx")
   @@index([expiresAt], name: "idempotency_key_expires_at_idx")
   @@map("idempotency_keys")
 }
@@ -2024,12 +2079,12 @@ enum IdempotencyStatus {
 
 /// Rate limit bucket for token-bucket algorithm (persistent, multi-instance safe).
 model RateLimitBucket {
-  id          String   @id @default(uuid()) @map("id")
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   keyPrefix   String   @map("key_prefix") @db.Text
   identifier  String   @map("identifier") @db.Text
   tokens      Int      @default(0)
   windowStart DateTime @default(now()) @map("window_start") @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@unique([keyPrefix, identifier], name: "rate_limit_bucket_key")
   @@index([windowStart], name: "rate_limit_bucket_window_idx")
@@ -2038,12 +2093,12 @@ model RateLimitBucket {
 
 /// Per-user daily token budget.
 model TokenBudget {
-  id          String   @id @default(uuid()) @map("id")
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId      String   @unique @map("user_id") @db.Uuid
   dailyBudget Int      @default(100000) @map("daily_budget")
   usedToday   Int      @default(0) @map("used_today")
   dayStart    DateTime @default(now()) @map("day_start") @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([dayStart], name: "token_budget_day_start_idx")
   @@map("token_budgets")
@@ -2051,14 +2106,14 @@ model TokenBudget {
 
 /// Token reservation with 5-minute lease for atomic budget management.
 model TokenReservation {
-  id            String             @id @default(uuid()) @map("id")
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId        String             @map("user_id") @db.Uuid
   tokens        Int
   status        ReservationStatus  @default(ACTIVE) @map("status")
   providerUsage Int?               @map("provider_usage")
   expiresAt     DateTime           @map("expires_at") @db.Timestamptz(6)
   createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt     DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([userId, status], name: "token_reservation_user_status_idx")
   @@index([expiresAt], name: "token_reservation_expires_at_idx")
@@ -2077,7 +2132,7 @@ model GlobalTokenBudget {
   id        String   @id @default("global") @map("id")
   usedToday Int      @default(0) @map("used_today")
   dayStart  DateTime @default(now()) @map("day_start") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("global_token_budget")
 }

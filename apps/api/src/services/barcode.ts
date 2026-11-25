@@ -162,6 +162,7 @@ export class BarcodeScannerService {
   constructor(
     private readonly repos: Repositories,
     private readonly nutritionTargets: NutritionTargetService,
+    private readonly fetchProduct: typeof fetch = (...args) => fetch(...args),
   ) {}
 
   /**
@@ -223,7 +224,7 @@ export class BarcodeScannerService {
    */
   private async fetchFromOpenFoodFacts(barcode: string): Promise<OpenFoodFactsProduct | null> {
     try {
-      const response = await fetch(`${OPENFOODFACTS_API}/${barcode}.json`, {
+      const response = await this.fetchProduct(`${OPENFOODFACTS_API}/${barcode}.json`, {
         headers: {
           "User-Agent": "FitCoach/1.0 (https://fitcoach.app; contact@fitcoach.app)",
         },

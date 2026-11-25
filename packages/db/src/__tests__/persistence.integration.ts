@@ -1565,6 +1565,10 @@ test("phase 3.1 a temporary environment plan coexists with the primary plan", as
     userId: user.id,
     name: "Home week",
     status: "active",
+    kind: "temporary_environment",
+    environmentKind: "home_no_equipment",
+    effectiveUntil: "2026-03-08",
+    temporaryForVersionId: primaryVersion.id,
     version: {
       planJson: JSON.stringify({
         sessions: [{ name: "Day 1", dayOfWeek: 0, slots: [{ exerciseId: exA!, targetSets: 3, targetReps: "6-10", targetRir: 2, loadPrescription: "rpe", loadValue: 8 }] }],

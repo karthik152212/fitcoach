@@ -130,21 +130,12 @@ export class RecipeService {
    * Compute nutrition for a consumed amount of recipe (in servings).
    * Used when logging a meal with a recipe item.
    */
-  async computeRecipeNutrition(recipeId: string, servings: number): Promise<NutrientAmounts> {
+  async computeRecipeNutrition(recipeId: string, servings: number): Promise<NutrientAmounts & { perServing: NutrientAmounts; total: NutrientAmounts }> {
     const recipe = await this.getRecipe(recipeId);
 
-    // Sum item quantities to get batch totals, then divide by recipe servings * requested servings
-    const itemSnapshots: NutrientAmounts[] = [];
-    for (const item of recipe.items) {
-      const food = await this.repos.foods.findById(item.foodId);
-      if (!food) throw new NotFoundError(`food ${item.foodId} not found`);
-      const snapshot = scaleNutrientDensity(food.nutrientsPer100g, item.quantityGrams);
-      itemSnapshots.push(snapshot);
-    }
-
-    const batchTotals = sumNutrientAmounts(itemSnapshots);
-    const totalServings = recipe.servings * servings;
-
-    return divideNutrientAmounts(batchTotals, totalServings);
+    const batch = await this.computeRecipeSnapshot(recipe.items);
+    const perServing = divideNutrientAmounts(batch.nutrientsPerServing, recipe.servings);
+    const total = scaleNutrientDensity(perServing, servings * 100);
+    return { ...total, perServing, total };
   }
 }

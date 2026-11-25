@@ -9,7 +9,13 @@ import type {
   UserId,
 } from "@fitcoach/domain";
 import { NotFoundError } from "@fitcoach/db";
-import { analyzeNutritionTrend, type NutritionTrendReport } from "@fitcoach/nutrition";
+import { analyzeNutritionTrend, divideNutrientAmounts, sumNutrientAmounts, type NutritionTrendReport } from "@fitcoach/nutrition";
+
+type IntakeAssessment = "under" | "on_target" | "over";
+
+function classifyIntake(ratio: number): IntakeAssessment {
+  return ratio < 0.9 ? "under" : ratio > 1.1 ? "over" : "on_target";
+}
 
 export interface AdherenceAssessment {
   /** Current day's totals vs targets (percentage) */
@@ -55,34 +61,43 @@ export class NutritionAssessmentService {
     userId: string,
     targets: NutritionTargets,
     windowDays?: number,
-  ): Promise<AdherenceAssessment> {
+  ): Promise<AdherenceAssessment & {
+    userId: string;
+    windowDays: number;
+    targets: NutritionTargets;
+    averages: NutrientAmounts;
+    adherence: { caloriesKcal: number; proteinGrams: number };
+    assessment: { caloriesKcal: IntakeAssessment; proteinGrams: IntakeAssessment };
+    daysLogged: number;
+  }> {
     await this.requireUser(userId);
     const days = windowDays ?? this.defaultWindowDays;
 
     // Get daily nutrition records for the window
     const dailyRecords = await this.getDailyRecords(userId, days);
-    if (dailyRecords.length === 0) {
-      return this.emptyAssessment(targets);
-    }
-
-    // Latest day's totals (we already checked length > 0)
-    const latest = dailyRecords[dailyRecords.length - 1]!;
-    const dailyAdherence = this.calculateDailyAdherence(latest.totals, targets);
-
-    // Trend analysis
+    const loggedDays = dailyRecords.filter(({ mealIds }) => mealIds.length > 0);
+    const averages = divideNutrientAmounts(
+      sumNutrientAmounts(loggedDays.map(({ totals }) => totals)),
+      Math.max(loggedDays.length, 1),
+    );
+    const calorieRatio = targets.caloriesKcal > 0 ? averages.caloriesKcal / targets.caloriesKcal : 0;
+    const proteinRatio = targets.proteinGrams > 0 ? averages.proteinGrams / targets.proteinGrams : 0;
+    const latest = dailyRecords.at(-1);
     const trends = analyzeNutritionTrend(dailyRecords, days);
-
-    // Flags based on trends (not single day)
+    const dailyAdherence = this.calculateDailyAdherence(latest?.totals ?? averages, targets);
     const flags = this.evaluateFlags(trends, targets);
 
-    // Summary
-    const summary = this.generateSummary(dailyAdherence, trends, flags);
-
     return {
-      dailyAdherence,
-      trends,
-      flags,
-      summary,
+      ...(latest
+        ? { dailyAdherence, trends, flags, summary: this.generateSummary(dailyAdherence, trends, flags) }
+        : this.emptyAssessment(targets)),
+      userId,
+      windowDays: days,
+      targets,
+      averages,
+      adherence: { caloriesKcal: calorieRatio, proteinGrams: proteinRatio },
+      assessment: { caloriesKcal: classifyIntake(calorieRatio), proteinGrams: classifyIntake(proteinRatio) },
+      daysLogged: loggedDays.length,
     };
   }
 

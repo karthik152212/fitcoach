@@ -58,6 +58,26 @@ after(async () => {
   }
 });
 
+test("fitcoach_app can read only its current user's idempotency rows", async () => {
+  const service = createIdempotencyService(undefined, prisma);
+  await service.checkAndStore(users.user_a, "rls-key", { user: "a" });
+  await service.checkAndStore(users.user_b, "rls-key", { user: "b" });
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL ROLE fitcoach_app`;
+    const readUserIds = async () => {
+      const rows = await tx.$queryRaw<{ user_id: string }[]>`SELECT user_id FROM idempotency_keys`;
+      return rows.map(({ user_id }) => user_id);
+    };
+
+    assert.deepEqual(await readUserIds(), []);
+    await tx.$queryRaw`SELECT set_config('app.current_user_id', ${users.user_a}, true)`;
+    assert.deepEqual(await readUserIds(), [users.user_a]);
+    await tx.$queryRaw`SELECT set_config('app.current_user_id', ${users.user_b}, true)`;
+    assert.deepEqual(await readUserIds(), [users.user_b]);
+  });
+});
+
 describe("PostgreSQL-backed RateLimitService", () => {
   test("allows requests within limit", async () => {
     const service = createRateLimitService(prisma);
@@ -312,7 +332,7 @@ describe("PostgreSQL-backed TokenBudgetService", () => {
   });
 
   test("concurrent reservations are atomic (budget respected)", async () => {
-    const service = createTokenBudgetService({ defaultDailyBudget: 500, maxTokensPerRequest: 200 }, prisma);
+    const service = createTokenBudgetService({ defaultDailyBudget: 500, maxTokensPerRequest: 200, strictMode: false }, prisma);
 
     // Fire 5 concurrent reservations for 200 tokens each (total would be 1000, budget is 500)
     const promises = Array.from({ length: 5 }, () => service.reserve(users.user_concurrent, 200));
