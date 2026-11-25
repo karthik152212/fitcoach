@@ -4,8 +4,8 @@ import { vi } from "vitest";
  * FitCoach test API mock.
  *
  * Intercepts global.fetch and returns canned JSON for exact (method, path)
- * routes. Paths are matched on the URL base (query string stripped): a route
- * matches when base === path or base starts with path + "/". The API client
+ * routes. Relative routes are matched against the URL pathname. Absolute
+ * routes include the origin. Both allow nested paths and ignore query strings. The API client
  * sends `fetch(url, { method, ... })`, so the method is read from the second
  * argument.
  *
@@ -33,11 +33,13 @@ export function mockApi(routes: readonly MockRoute[]) {
 
   globalThis.fetch = vi.fn((url: string | URL, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
-    const base = String(url).split("?")[0]!;
+    const requestUrl = new URL(url, window.location.origin);
+    const base = requestUrl.origin + requestUrl.pathname;
     const candidates = byMethod[method] ?? [];
     const match = candidates.find((route) => {
       const rp = route.path.split("?")[0]!;
-      return base === rp || base.startsWith(rp.endsWith("/") ? rp : rp + "/");
+      const requestPath = rp.startsWith("/") ? requestUrl.pathname : base;
+      return requestPath === rp || requestPath.startsWith(rp.endsWith("/") ? rp : rp + "/");
     });
     if (!match) {
       console.warn(`[mockApi] no route for ${method} ${base}`);

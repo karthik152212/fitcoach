@@ -80,7 +80,7 @@ function renderPerform({
   let persistedSets = 0;
 
   mockApi([
-    { method: "GET", path: `/v0/exercises/${EXERCISE_ID}`, body: detail },
+    { method: "GET", path: `/v0/exercises/${EXERCISE_ID}`, body: exerciseDetail },
     {
       method: "GET",
       path: `/v0/users/${TEST_USER}/performance-history`,
@@ -114,7 +114,7 @@ function renderPerform({
       </SessionProvider>
     </MemoryRouter>
   );
-  return { detail, container };
+  return { detail: exerciseDetail, container };
 }
 
 afterEach(() => {

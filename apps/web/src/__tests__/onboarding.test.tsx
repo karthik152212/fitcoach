@@ -163,7 +163,7 @@ function callsTo(mock: ApiMock, method: string, path: string) {
   return calls
     .filter(
       ([url, init]) =>
-        String(url).split("?")[0] === path &&
+        new URL(url, window.location.origin).pathname === path &&
         (init?.method ?? "GET").toUpperCase() === method,
     )
     .map(([, init]) => (init?.body ? JSON.parse(String(init.body)) : null));

@@ -66,6 +66,9 @@ jobs:
           test "${#tests[@]}" -gt 0
           node --test --test-reporter=tap "${tests[@]}"
 
+      - name: Run web tests
+        run: npm run test:web
+
   integration-tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
